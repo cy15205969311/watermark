@@ -92,23 +92,57 @@ async function removeWatermark(inputPath, outputPath) {
       .toBuffer();
     console.log("   [检测3/3] 浅色水印检测完成");
 
-    // 1d. 三层融合 OR操作
+    // === 【新增】1d. 图怪兽/创客贴特定水印检测 ===
+    console.log("   [检测4/4] 开始图怪兽/创客贴特定水印检测...");
+
+    // 检测特定位置的水印（通常在四角或中心）
+    const cornerMask = Buffer.alloc(width * height);
+    const cornerSize = Math.min(width, height) * 0.15; // 角落区域大小
+
+    // 标记四个角落和中心区域
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const idx = y * width + x;
+        const isCorner =
+          (x < cornerSize && y < cornerSize) || // 左上
+          (x > width - cornerSize && y < cornerSize) || // 右上
+          (x < cornerSize && y > height - cornerSize) || // 左下
+          (x > width - cornerSize && y > height - cornerSize) || // 右下
+          (Math.abs(x - width / 2) < cornerSize && Math.abs(y - height / 2) < cornerSize); // 中心
+
+        cornerMask[idx] = isCorner ? 255 : 0;
+      }
+    }
+
+    const cornerMaskSharp = await sharp(cornerMask, {
+      raw: { width, height, channels: 1 }
+    }).toBuffer();
+
+    // 结合角落区域和边缘检测
+    const platformSpecificMask = await sharp(strongEdges)
+      .composite([{ input: cornerMaskSharp, blend: "multiply" }])
+      .toBuffer();
+
+    console.log("   [检测4/4] 图怪兽/创客贴特定水印检测完成");
+
+    // 1e. 四层融合 OR操作（包含平台特定检测）
     const combinedMask = await sharp(blackTextMask)
       .composite([
         { input: colorShapeMask, blend: "lighten" },
         { input: lightWatermarkMask, blend: "lighten" },
+        { input: platformSpecificMask, blend: "lighten" }, // 【新增】平台特定水印
       ])
       .toBuffer();
 
-    // 1e. 形态学闭运算（填充内部空洞）+ 强化膨胀 + 软化
+    // 1e. 【强化版】形态学闭运算（填充内部空洞）+ 超强膨胀 + 软化
     const watermarkMask = await sharp(combinedMask)
-      .convolve({ width: 9, height: 9, kernel: Array(81).fill(1 / 81) }) // 增大膨胀范围
-      .blur(5.0) // 更大范围软化边界，确保覆盖完整
-      .threshold(75) // 降低阈值，增加检测范围
+      .convolve({ width: 13, height: 13, kernel: Array(169).fill(1 / 169) }) // 【增强】更大膨胀范围 9x9 -> 13x13
+      .blur(7.0) // 【增强】更大范围软化边界 5.0 -> 7.0
+      .threshold(65) // 【增强】更低阈值，增加检测范围 75 -> 65
       .toColourspace("b-w")
       .toBuffer();
 
-    console.log("   [掩膜融合] 多特征掩膜生成完成");
+    console.log("   [掩膜融合] 多特征掩膜生成完成（包含平台特定检测）");
 
     console.log("   [掩膜融合] 多特征掩膜生成完成");
 
@@ -128,18 +162,18 @@ async function removeWatermark(inputPath, outputPath) {
 
     const coarseTex = await base.clone().blur(3.5).median(3).toBuffer();
 
-    // 2b. 基础修复层 - 极致细节保留策略
+    // 2b. 【强化版】基础修复层 - 加强去水印力度
     const baseRepair = await base
       .clone()
-      .blur(2.2) // 极低模糊，最大化细节保留
-      .median(2) // 极轻中值滤波
-      .blur(0.6) // 极轻平滑
+      .blur(3.5) // 【增强】提高模糊强度 2.2 -> 3.5，更彻底去除水印
+      .median(3) // 【增强】加强中值滤波 2 -> 3
+      .blur(1.2) // 【增强】增加平滑 0.6 -> 1.2
       .toBuffer();
 
-    // 2c. 构建自适应融合权重 - 强化平滑过渡
-    const strongMask = await sharp(watermarkMask).blur(3).toBuffer(); // 核心修复区
-    const mediumMask = await sharp(watermarkMask).blur(6).toBuffer(); // 过渡区
-    const softMask = await sharp(watermarkMask).blur(10).toBuffer(); // 边缘融合区（扩大范围）
+    // 2c. 【强化版】构建自适应融合权重 - 超强平滑过渡
+    const strongMask = await sharp(watermarkMask).blur(5).toBuffer(); // 【增强】核心修复区 3 -> 5
+    const mediumMask = await sharp(watermarkMask).blur(9).toBuffer(); // 【增强】过渡区 6 -> 9
+    const softMask = await sharp(watermarkMask).blur(14).toBuffer(); // 【增强】边缘融合区 10 -> 14
 
     // 2d. 分层纹理重建
     const repairAlpha = await sharp(baseRepair)
@@ -152,26 +186,26 @@ async function removeWatermark(inputPath, outputPath) {
 
     let merged = await sharp(origBuffer).toBuffer();
 
-    // 多层纹理融合 - 深度水印清除模式
+    // 【强化版】多层纹理融合 - 超强水印清除模式
     merged = await sharp(merged)
       .composite([
         {
           input: repairAlpha,
           blend: "over",
           premultiplied: true,
-          opacity: 0.7, // 提升透明度，增强去水印力度
+          opacity: 0.85, // 【增强】大幅提升透明度 0.7 -> 0.85，超强去水印
         },
         {
           input: midTexAlpha,
           blend: "over",
           premultiplied: true,
-          opacity: 0.3, // 纹理层
+          opacity: 0.45, // 【增强】纹理层 0.3 -> 0.45
         },
         {
           input: fineTexAlpha,
           blend: "over",
           premultiplied: true,
-          opacity: 0.2, // 精细层
+          opacity: 0.3, // 【增强】精细层 0.2 -> 0.3
         },
       ])
       .toBuffer();
@@ -203,13 +237,13 @@ async function removeWatermark(inputPath, outputPath) {
     console.log("   [色彩优化] 深度色彩一致性增强完成");
 
     // === 步骤4: 智能降噪与清晰度恢复（深度清除版） ===
-    // 4a. 针对水印区域强化降噪
+    // 4a. 【强化版】针对水印区域超强降噪
     const denoised = await sharp(merged)
-      .median(2) // 提升降噪强度，消除水印残留
-      .blur(0.5) // 增加轻微模糊平滑
+      .median(3) // 【增强】大幅提升降噪强度 2 -> 3
+      .blur(0.8) // 【增强】增加模糊平滑 0.5 -> 0.8
       .toBuffer();
 
-    const denoiseMask = await sharp(watermarkMask).blur(6).toBuffer();
+    const denoiseMask = await sharp(watermarkMask).blur(8).toBuffer(); // 【增强】6 -> 8
     const denoiseAlpha = await sharp(denoised)
       .joinChannel(denoiseMask)
       .toBuffer();
@@ -220,12 +254,41 @@ async function removeWatermark(inputPath, outputPath) {
           input: denoiseAlpha,
           blend: "over",
           premultiplied: true,
-          opacity: 0.55,
+          opacity: 0.7, // 【增强】提高降噪参与度 0.55 -> 0.7
         },
       ])
       .toBuffer();
 
     console.log("   [降噪处理] 深度选择性降噪完成");
+
+    // === 【新增】步骤4.1: 水印区域二次强化处理 ===
+    console.log("   [二次强化] 开始水印区域二次深度清除...");
+
+    // 对检测到的水印区域进行二次迭代处理
+    const watermarkRegionMask = await sharp(watermarkMask).blur(4).threshold(128).toBuffer();
+
+    // 二次修复：更强的模糊和修复
+    const secondRepair = await sharp(merged)
+      .blur(4.5) // 超强模糊
+      .median(4) // 超强中值滤波
+      .toBuffer();
+
+    const secondRepairAlpha = await sharp(secondRepair)
+      .joinChannel(watermarkRegionMask)
+      .toBuffer();
+
+    merged = await sharp(merged)
+      .composite([
+        {
+          input: secondRepairAlpha,
+          blend: "over",
+          premultiplied: true,
+          opacity: 0.6, // 二次修复参与度
+        },
+      ])
+      .toBuffer();
+
+    console.log("   [二次强化] 水印区域二次深度清除完成");
 
     // 4b. 全图强力锐化
     const invertMask = await sharp(watermarkMask).negate().blur(2).toBuffer();
@@ -501,8 +564,7 @@ async function detectWatermarkRegions(inputPath, metadata) {
     detectionMap.hasBlackText = blackSum / totalPixels > 0.05; // 超过5%面积为黑色
     detectionMap.hasTransparentLogo = satSum / totalPixels < 100; // 饱和度异常低
     console.log(
-      `   检测结果: 黑字=${detectionMap.hasBlackText}, 透明Logo=${
-        detectionMap.hasTransparentLogo
+      `   检测结果: 黑字=${detectionMap.hasBlackText}, 透明Logo=${detectionMap.hasTransparentLogo
       }, 边缘强度=${detectionMap.edgeIntensity.toFixed(2)}`
     );
     console.log("   [检测] 描边掩码生成完成");
@@ -1078,8 +1140,8 @@ async function multiscaleFusion(
     const mean = chan0
       ? chan0.mean
       : stats.channels && stats.channels[0]
-      ? stats.channels[0].mean
-      : 128;
+        ? stats.channels[0].mean
+        : 128;
     let highPct = 0,
       shadowPct = 0;
     if (chan0) {

@@ -225,43 +225,235 @@ async function scrape818ps(url) {
     await page.setViewport({ width: 1920, height: 1080, deviceScaleFactor: 2 });
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
 
-    // 注入样式与脚本：移除水印层与含水印的背景/图片
+    // 【超强版】注入样式与脚本：移除水印层与含水印的背景/图片
     await page.addStyleTag({
       content: `
+      /* 通用水印隐藏 */
       [class*="watermark"], [id*="watermark"], .watermark, .wm, .wm-layer, .wm-text,
-      .logo-watermark, .logoLayer, .mark, .mark-text, .preview-watermark { display:none !important; opacity:0 !important; visibility:hidden !important; }
+      .logo-watermark, .logoLayer, .mark, .mark-text, .preview-watermark,
+      /* 图怪兽特定水印 */
+      [class*="tuguaishou"], [class*="818ps"], [class*="guais"],
+      [id*="tuguaishou"], [id*="818ps"], [id*="guais"],
+      .tgs-watermark, .tgs-logo, .tgs-mark, .ps818-watermark, .ps818-logo,
+      /* 遮罩层 */
+      [class*="mask"], [class*="overlay"], .mask-layer, .overlay-layer,
+      /* 版权信息 */
+      [class*="copyright"], [class*="brand"], .copyright, .brand-logo,
+      /* SVG水印 */
+      svg[class*="watermark"], svg[class*="logo"], svg[class*="mark"],
+      /* 【新增】文字水印层 - 针对DOM文字水印 */
+      [class*="text-watermark"], [class*="text-mark"], [class*="text-layer"],
+      [id*="text-watermark"], [id*="text-mark"], [id*="text-layer"],
+      .text-overlay, .text-mask, .watermark-text, .mark-text-layer,
+      /* 【新增】图怪兽特定文字水印类名 */
+      [class*="tgs-text"], [class*="ps818-text"], [class*="banner-watermark"]
+      { display:none !important; opacity:0 !important; visibility:hidden !important; pointer-events:none !important; width:0 !important; height:0 !important; }
     `,
     });
     await page.evaluate(() => {
       const keywords = [
-        "watermark",
-        "logo",
-        "mark",
-        "tuguaishou",
-        "818ps",
-        "guais",
+        "watermark", "logo", "mark", "tuguaishou", "818ps", "guais",
+        "tgs", "ps818", "brand", "copyright", "mask", "overlay"
       ];
+
+      // 【新增】文字水印关键词（中文+英文）
+      const textWatermarkKeywords = [
+        "图怪兽", "tuguaishou", "818ps", "818设计", "免费", "会员",
+        "水印", "版权", "copyright", "watermark", "试用", "vip",
+        "升级", "付费", "购买", "解锁", "限时", "活动", "马迎新春",
+        "春节放假通知", "放假", "通知"
+      ];
+
+      console.log("🧹 开始清理DOM水印...");
+
+      // ========== 第一轮：移除所有可能的水印元素 ==========
       const all = document.querySelectorAll("*");
+      let removedCount = 0;
+
       for (const el of all) {
-        const cs = getComputedStyle(el);
-        const bg = cs.backgroundImage;
-        if (bg && /url\(/.test(bg)) {
-          const m = bg.match(/url\(["']?(.*?)["']?\)/);
-          if (m && m[1]) {
-            const u = m[1].toLowerCase();
-            if (keywords.some((k) => u.includes(k))) {
-              el.style.backgroundImage = "none";
+        try {
+          // 检查类名和ID
+          const className = (el.className || "").toString().toLowerCase();
+          const id = (el.id || "").toLowerCase();
+          const tagName = el.tagName.toLowerCase();
+
+          if (keywords.some(k => className.includes(k) || id.includes(k))) {
+            el.remove();
+            removedCount++;
+            continue;
+          }
+
+          // 检查背景图片
+          const cs = getComputedStyle(el);
+          const bg = cs.backgroundImage;
+          if (bg && /url\(/.test(bg)) {
+            const m = bg.match(/url\(["']?(.*?)["']?\)/);
+            if (m && m[1]) {
+              const u = m[1].toLowerCase();
+              if (keywords.some((k) => u.includes(k))) {
+                el.style.backgroundImage = "none";
+              }
             }
           }
-        }
-        const imgs = el.tagName === "IMG" ? [el] : el.querySelectorAll("img");
-        for (const img of imgs) {
-          const src = (img.currentSrc || img.src || "").toLowerCase();
-          if (src && keywords.some((k) => src.includes(k))) {
-            img.style.display = "none";
+
+          // 检查img标签
+          if (tagName === "img") {
+            const src = (el.currentSrc || el.src || "").toLowerCase();
+            const alt = (el.alt || "").toLowerCase();
+            if (keywords.some(k => src.includes(k) || alt.includes(k))) {
+              el.remove();
+              removedCount++;
+            }
           }
+
+          // 检查SVG元素
+          if (tagName === "svg") {
+            const svgContent = el.outerHTML.toLowerCase();
+            if (keywords.some(k => svgContent.includes(k))) {
+              el.remove();
+              removedCount++;
+            }
+          }
+
+          // 【增强】检查文本内容（文字水印）- 方案6
+          const text = el.textContent || "";
+          const textLower = text.toLowerCase();
+
+          // 关键词匹配
+          if (textWatermarkKeywords.some(k => text.includes(k) || textLower.includes(k))) {
+            console.log(`  🎯 发现文字水印: "${text.substring(0, 30)}..."`);
+            el.remove();
+            removedCount++;
+            continue;
+          }
+        } catch (e) {
+          // 忽略单个元素处理错误
         }
       }
+
+      console.log(`  ✅ 第一轮清理完成，移除 ${removedCount} 个元素`);
+
+      // ========== 第二轮：基于位置的文字水印检测（方案2） ==========
+      console.log("🎯 开始基于位置的文字水印检测...");
+      let positionRemovedCount = 0;
+
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      const cornerSize = Math.min(viewportWidth, viewportHeight) * 0.25; // 角落区域25%
+
+      document.querySelectorAll("p, span, div, h1, h2, h3, h4, h5, h6, a, label, strong, b").forEach(el => {
+        try {
+          const rect = el.getBoundingClientRect();
+          const text = el.textContent || "";
+
+          // 跳过空文本
+          if (!text.trim() || text.trim().length === 0) return;
+
+          // 检查是否在四角区域
+          const isInCorner =
+            (rect.left < cornerSize && rect.top < cornerSize) || // 左上
+            (rect.right > viewportWidth - cornerSize && rect.top < cornerSize) || // 右上
+            (rect.left < cornerSize && rect.bottom > viewportHeight - cornerSize) || // 左下
+            (rect.right > viewportWidth - cornerSize && rect.bottom > viewportHeight - cornerSize); // 右下
+
+          if (isInCorner) {
+            const cs = getComputedStyle(el);
+            const fontSize = parseFloat(cs.fontSize) || 0;
+            const zIndex = parseInt(cs.zIndex) || 0;
+
+            // 方案3：大字体检测 + 方案5：高层级检测
+            if (fontSize > 16 || zIndex > 50 || cs.position === "absolute" || cs.position === "fixed") {
+              console.log(`  🎯 移除角落文字: "${text.substring(0, 40)}..." (位置: ${Math.round(rect.left)},${Math.round(rect.top)}, 字体: ${fontSize}px)`);
+              el.remove();
+              positionRemovedCount++;
+            }
+          }
+        } catch (e) { }
+      });
+
+      console.log(`  ✅ 第二轮清理完成，移除 ${positionRemovedCount} 个元素`);
+
+      // ========== 第三轮：基于层级的检测（方案5） ==========
+      console.log("🎯 开始基于层级的文字水印检测...");
+      let zIndexRemovedCount = 0;
+
+      document.querySelectorAll("*").forEach(el => {
+        try {
+          const cs = getComputedStyle(el);
+          const zIndex = parseInt(cs.zIndex) || 0;
+          const position = cs.position;
+
+          // 高z-index的绝对定位元素
+          if ((position === "absolute" || position === "fixed") && zIndex > 100) {
+            const rect = el.getBoundingClientRect();
+            const text = el.textContent || "";
+
+            // 如果包含文本且尺寸不大（不是主要内容）
+            if (text.trim() && rect.width < 600 && rect.height < 400) {
+              console.log(`  🎯 移除高层级元素: z-index=${zIndex}, "${text.substring(0, 30)}..."`);
+              el.remove();
+              zIndexRemovedCount++;
+            }
+          }
+        } catch (e) { }
+      });
+
+      console.log(`  ✅ 第三轮清理完成，移除 ${zIndexRemovedCount} 个元素`);
+
+      // ========== 第四轮：基于样式的检测（方案4+9） ==========
+      console.log("🎯 开始基于样式的文字水印检测...");
+      let styleRemovedCount = 0;
+
+      document.querySelectorAll("p, span, div, h1, h2, h3, h4, h5, h6").forEach(el => {
+        try {
+          const cs = getComputedStyle(el);
+          const text = el.textContent || "";
+
+          if (!text.trim()) return;
+
+          // 方案9：半透明文本
+          const opacity = parseFloat(cs.opacity);
+          if (opacity > 0 && opacity < 0.9) {
+            const rect = el.getBoundingClientRect();
+            if (rect.width < 500 && rect.height < 300) {
+              console.log(`  🎯 移除半透明文字: opacity=${opacity.toFixed(2)}, "${text.substring(0, 30)}..."`);
+              el.remove();
+              styleRemovedCount++;
+              return;
+            }
+          }
+
+          // 方案4：特殊颜色检测（红色、金色等醒目颜色）
+          const color = cs.color;
+          const colorMatch = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+          if (colorMatch) {
+            const r = parseInt(colorMatch[1]);
+            const g = parseInt(colorMatch[2]);
+            const b = parseInt(colorMatch[3]);
+
+            // 检测红色系（r > 180, g < 120, b < 120）
+            // 检测金色系（r > 180, g > 130, b < 100）
+            const isRedish = r > 180 && g < 120 && b < 120;
+            const isGoldish = r > 180 && g > 130 && b < 100;
+
+            if (isRedish || isGoldish) {
+              const rect = el.getBoundingClientRect();
+              const fontSize = parseFloat(cs.fontSize) || 0;
+              if (rect.width < 600 && rect.height < 300 && fontSize > 14) {
+                console.log(`  🎯 移除醒目颜色文字: color=${color}, "${text.substring(0, 30)}..."`);
+                el.remove();
+                styleRemovedCount++;
+              }
+            }
+          }
+        } catch (e) { }
+      });
+
+      console.log(`  ✅ 第四轮清理完成，移除 ${styleRemovedCount} 个元素`);
+
+      // ========== 总结 ==========
+      const totalRemoved = removedCount + positionRemovedCount + zIndexRemovedCount + styleRemovedCount;
+      console.log(`\n🎉 DOM水印清理完成！共移除 ${totalRemoved} 个水印元素`);
     });
 
     // 等待并滚动触发懒加载
@@ -665,7 +857,7 @@ async function scrapeChuangkit(pageUrl) {
     console.log("🌐 正在加载创客贴页面并拦截图片请求...");
     await page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
 
-    // 注入高级样式：隐藏所有非设计稿内容
+    // 【增强版】注入高级样式：隐藏所有非设计稿内容和水印
     await page.addStyleTag({
       content: `
         /* 隐藏页面UI元素 */
@@ -675,16 +867,33 @@ async function scrapeChuangkit(pageUrl) {
         /* 隐藏创客贴特有的UI */
         .ck-header, .ck-nav, .ck-toolbar, .ck-sidebar,
         .ck-footer, .ck-menu, .ck-panel, .ck-controls,
-        /* 隐藏水印和遮罩 */
+        /* 【强化】隐藏水印和遮罩 - 更全面的选择器 */
         [class*="watermark"], [class*="mark"], [class*="overlay"], [class*="mask"],
+        [id*="watermark"], [id*="mark"], [id*="overlay"], [id*="mask"],
         .wm, .copyright, .logo, .brand, .watermark-layer, .mark-layer,
         [class*="logo"], [class*="brand"], [class*="copyright"],
         .preview-mask, .design-mask, .template-mask,
         .ck-watermark, .ck-mask, .ck-overlay, .ck-logo,
-        .template-watermark, .design-watermark, .work-watermark {
+        .template-watermark, .design-watermark, .work-watermark,
+        /* 创客贴特定水印 */
+        [class*="chuangkit"][class*="watermark"],
+        [class*="chuangkit"][class*="logo"],
+        [class*="chuangkit"][class*="mark"],
+        .chuangkit-watermark, .chuangkit-logo, .chuangkit-mark,
+        /* 图怪兽特定水印 */
+        [class*="tuguaishou"], [class*="818ps"], [class*="guais"],
+        .tgs-watermark, .tgs-logo, .ps818-watermark,
+        /* SVG水印 */
+        svg[class*="watermark"], svg[class*="logo"], svg[class*="mark"],
+        /* 文字水印 */
+        [class*="text-watermark"], [class*="text-mark"],
+        .text-overlay, .text-mask {
           display: none !important; 
           opacity: 0 !important; 
           visibility: hidden !important;
+          pointer-events: none !important;
+          width: 0 !important;
+          height: 0 !important;
         }
         
         /* 确保设计稿内容突出显示 */
@@ -703,13 +912,15 @@ async function scrapeChuangkit(pageUrl) {
       `,
     });
 
-    // 执行高级JavaScript清理和内容识别
+    // 【增强版】执行高级JavaScript清理和内容识别
     await page.evaluate(() => {
       // 移除所有非设计稿相关元素
       const removeKeywords = [
         'header', 'nav', 'footer', 'sidebar', 'toolbar', 'menu',
         'watermark', 'mark', 'logo', 'brand', 'copyright', 'ui',
-        'button', 'control', 'panel', 'overlay', 'mask'
+        'button', 'control', 'panel', 'overlay', 'mask',
+        // 【新增】创客贴和图怪兽特定关键词
+        'chuangkit', 'tuguaishou', '818ps', 'guais', 'tgs', 'ps818'
       ];
 
       const allElements = document.querySelectorAll('*');
@@ -740,9 +951,9 @@ async function scrapeChuangkit(pageUrl) {
           );
 
           if (isNonDesignElement) {
-            el.style.display = 'none';
-            el.style.opacity = '0';
-            el.style.visibility = 'hidden';
+            // 【强化】直接移除而不是隐藏
+            el.remove();
+            return;
           }
 
           // 特别处理背景图片
@@ -754,9 +965,43 @@ async function scrapeChuangkit(pageUrl) {
               el.style.backgroundImage = 'none';
             }
           }
+
+          // 【新增】检查文本内容是否为水印文字
+          if (el.childNodes.length === 1 && el.childNodes[0].nodeType === 3) {
+            const text = el.textContent.toLowerCase();
+            if (removeKeywords.some(k => text.includes(k))) {
+              el.remove();
+              return;
+            }
+          }
+
+          // 【新增】移除高z-index的小元素（通常是水印）
+          const position = computedStyle.position;
+          if (position === 'absolute' || position === 'fixed') {
+            const rect = el.getBoundingClientRect();
+            const zIndex = parseInt(computedStyle.zIndex) || 0;
+            // 小尺寸 + 高z-index = 水印
+            if (rect.width < 300 && rect.height < 150 && zIndex > 100) {
+              el.remove();
+            }
+          }
         } catch (e) {
           // 忽略处理错误
         }
+      });
+
+      // 【新增】三次清理：移除所有透明度很低的元素（可能是隐藏的水印）
+      document.querySelectorAll('*').forEach(el => {
+        try {
+          const cs = window.getComputedStyle(el);
+          const opacity = parseFloat(cs.opacity);
+          if (opacity > 0 && opacity < 0.3) {
+            const rect = el.getBoundingClientRect();
+            if (rect.width < 400 && rect.height < 200) {
+              el.remove();
+            }
+          }
+        } catch (e) { }
       });
     });
 
