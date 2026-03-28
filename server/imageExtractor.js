@@ -8,7 +8,9 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 const qs = require("querystring");
 const { extractViaThirdPartyAPIWithCache } = require("./thirdPartyApiGateway");
+const { extract818ps } = require("./extractors/818ps");
 const {
+  scrapeWithBrowser,
   scrape818ps,
   scrapeCanva,
   scrapeDouyin,
@@ -70,6 +72,98 @@ function buildCanvaNoWatermarkVariants(url) {
 
   const withQuery = Array.from(variants).map((v) => (query ? v + query : v));
   return [...variants, ...withQuery];
+}
+
+function isChuangkitTarget(url, platform) {
+  return (
+    String(url || "").includes("chuangkit.com") ||
+    platform === "Chuangkit" ||
+    platform === "创客贴"
+  );
+}
+
+function normalizeChuangkitCandidateUrl(url) {
+  if (typeof url !== "string") {
+    return null;
+  }
+
+  const normalized = url.trim().replace(/\\/g, "/");
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized.startsWith("//")) {
+    return `https:${normalized}`;
+  }
+
+  return normalized;
+}
+
+function scoreChuangkitCandidateUrl(url) {
+  const normalized = normalizeChuangkitCandidateUrl(url);
+  if (!normalized) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  const lower = normalized.toLowerCase();
+  let score = 0;
+
+  if (lower.includes("chuangkit.com")) score += 200;
+  if (lower.includes("cdn")) score += 100;
+  if (lower.includes("svg_build/render_result")) score += 900;
+  if (/render_result|design|work|template|poster|banner/.test(lower)) score += 450;
+  if (/preview|main|primary|original|full/.test(lower)) score += 200;
+
+  if (/thumb|small|mini|icon|avatar|logo/.test(lower)) score -= 900;
+  if (/watermark|mask|overlay|mark/.test(lower)) score -= 600;
+
+  if (/\.jpe?g(?:$|\?)/.test(lower)) score += 40;
+  if (/\.png(?:$|\?)/.test(lower)) score += 30;
+  if (/\.webp(?:$|\?)/.test(lower)) score += 20;
+
+  return score;
+}
+
+function dedupeChuangkitUrls(urls) {
+  const seen = new Set();
+  const result = [];
+
+  for (const rawUrl of urls || []) {
+    const normalized = normalizeChuangkitCandidateUrl(rawUrl);
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    result.push(normalized);
+  }
+
+  return result;
+}
+
+function buildChuangkitPages(imageUrls) {
+  return (imageUrls || []).map((imageUrl, index) => ({
+    page: index + 1,
+    imageUrl,
+  }));
+}
+
+function buildChuangkitResult(imageUrls, extras = {}) {
+  const uniqueUrls = dedupeChuangkitUrls(imageUrls);
+  const pages = buildChuangkitPages(uniqueUrls);
+
+  return {
+    success: extras.success !== false,
+    platform: "Chuangkit",
+    ...extras,
+    imageUrl: uniqueUrls[0] || extras.imageUrl || null,
+    thumbnailUrl: extras.thumbnailUrl || uniqueUrls[0] || extras.imageUrl || null,
+    imageUrls: uniqueUrls,
+    images: uniqueUrls,
+    pages,
+    pageCount: uniqueUrls.length,
+    isMultiPage: uniqueUrls.length > 1,
+  };
 }
 
 // 简单重试辅助，带指数回退
@@ -274,8 +368,51 @@ async function validateImageUrl(imageUrl) {
 /**
  * 从 818ps 提取图片 - 使用网页抓取
  */
+async function collectValidatedChuangkitCandidates(candidates, options = {}) {
+  const maxResults = Number(options.maxResults) || 8;
+  const sortedCandidates = dedupeChuangkitUrls(candidates).sort(
+    (a, b) => scoreChuangkitCandidateUrl(b) - scoreChuangkitCandidateUrl(a)
+  );
+  const results = [];
+
+  for (const candidate of sortedCandidates) {
+    if (scoreChuangkitCandidateUrl(candidate) < 100) {
+      continue;
+    }
+
+    const ok = await validateImageUrl(candidate);
+    if (!ok) {
+      continue;
+    }
+
+    results.push(candidate);
+    if (results.length >= maxResults) {
+      break;
+    }
+  }
+
+  return results;
+}
+
 async function extract818psImage(url) {
   try {
+    try {
+      const optimizedResult = await extract818ps(url, {
+        timeout: 15000,
+        headless: true,
+      });
+
+      if (optimizedResult && optimizedResult.success && optimizedResult.imageUrl) {
+        console.log("✅ 新版 818ps 提取器命中:", {
+          source: optimizedResult.source,
+          pageCount: optimizedResult.pageCount || 1,
+        });
+        return optimizedResult;
+      }
+    } catch (optimizedError) {
+      console.warn("⚠️ 新版 818ps 提取器失败，回退旧逻辑:", optimizedError.message);
+    }
+
     const urlObj = new URL(url);
     const picId = urlObj.searchParams.get("picId");
     const upicId = urlObj.searchParams.get("upicId");
@@ -863,6 +1000,37 @@ async function extractChuangkitImage(url) {
       if (result) {
         console.log("✅ Puppeteer 创客贴主设计稿抓取成功");
 
+        if (typeof result === "object") {
+          const primaryImageUrl =
+            result.imageUrl ||
+            result.thumbnailUrl ||
+            (Array.isArray(result.imageUrls) ? result.imageUrls[0] : null) ||
+            (Array.isArray(result.images) ? result.images[0] : null) ||
+            null;
+
+          if (primaryImageUrl) {
+            const isDataUrl =
+              typeof primaryImageUrl === "string" &&
+              primaryImageUrl.startsWith("data:image");
+
+            return {
+              ...result,
+              imageUrl: primaryImageUrl,
+              thumbnailUrl: result.thumbnailUrl || primaryImageUrl,
+              platform: "Chuangkit",
+              source:
+                result.source || (isDataUrl ? "puppeteer-screenshot" : "puppeteer-url"),
+              quality: result.quality || (isDataUrl ? "preview" : "high"),
+              linkType: isShareLink ? "share" : "direct",
+              notice:
+                result.notice ||
+                (isDataUrl
+                  ? "已截取完整主设计稿，可能包含平台标识"
+                  : undefined),
+            };
+          }
+        }
+
         const isDataUrl = typeof result === "string" && result.startsWith("data:image");
         const isHighQuality = typeof result === "string" && result.startsWith("http");
 
@@ -1058,12 +1226,244 @@ async function extractXiaohongshuImage(url) {
  * 主提取函数 - 架构级优化版本
  * 优先级：第三方 API (80%) -> 本地平台特定提取 (20%) -> 兜底方案 -> 抛错
  */
+async function extractChuangkitImageEnhanced(url) {
+  try {
+    console.log("🧩 开始提取创客贴主设计稿/套图:", url);
+
+    const isShareLink = url.includes("/sharedesign");
+    const isDesignLink = url.includes("/designs/");
+    const isTemplateLink = url.includes("/templates/");
+    const linkType = isShareLink ? "share" : isDesignLink ? "direct" : isTemplateLink ? "template" : "other";
+    let staticFallbackUrls = [];
+
+    console.log(
+      `📋 链接类型: ${
+        isShareLink ? "分享链接" : isDesignLink ? "设计稿链接" : isTemplateLink ? "模板链接" : "其他链接"
+      }`
+    );
+
+    try {
+      const response = await axios.get(url, {
+        headers: {
+          ...COMMON_HEADERS,
+          Referer: "https://www.chuangkit.com/",
+        },
+        timeout: 15000,
+        maxRedirects: 5,
+      });
+
+      const $ = cheerio.load(response.data || "");
+      const staticCandidates = [];
+      const addStaticCandidate = (rawUrl) => {
+        const normalized = normalizeChuangkitCandidateUrl(rawUrl);
+        if (
+          !normalized ||
+          !/^https?:\/\//i.test(normalized) ||
+          scoreChuangkitCandidateUrl(normalized) < 100
+        ) {
+          return;
+        }
+        staticCandidates.push(normalized);
+      };
+
+      const metaSelectors = [
+        'meta[property="og:image"]',
+        'meta[name="twitter:image"]',
+        'meta[property="og:image:url"]',
+        'meta[name="twitter:image:src"]',
+        'link[rel="image_src"]',
+      ];
+      metaSelectors.forEach((selector) => {
+        addStaticCandidate($(selector).attr("content") || $(selector).attr("href"));
+      });
+
+      if (isShareLink) {
+        console.log("🔗 处理创客贴分享链接...");
+        const shareSelectors = [
+          ".share-preview img",
+          ".share-design img",
+          ".share-template img",
+          ".share-work img",
+          ".design-share-preview img",
+          ".template-share-preview img",
+          "#share-preview img",
+          ".preview-share img",
+        ];
+
+        for (const selector of shareSelectors) {
+          const elements = $(selector);
+          for (let i = 0; i < elements.length; i++) {
+            const imgSrc = $(elements[i]).attr("src") || $(elements[i]).attr("data-src");
+            if (imgSrc) {
+              addStaticCandidate(imgSrc.startsWith("http") ? imgSrc : `https:${imgSrc}`);
+            }
+          }
+        }
+      }
+
+      const designSelectors = [
+        ".design-preview-container img",
+        ".work-preview-container img",
+        ".template-preview-container img",
+        ".main-design-area img",
+        ".design-canvas img",
+        ".work-canvas img",
+        ".main-canvas img",
+        ".canvas-container img",
+        ".preview-image img",
+        ".design-preview img",
+        ".work-preview img",
+        ".main-preview img",
+        ".template-preview img",
+        ".ck-preview img",
+        ".ck-design img",
+        ".ck-work img",
+        ".ck-template img",
+        'img[src*="chuangkit"][src*="design"]',
+        'img[src*="chuangkit"][src*="work"]',
+        'img[src*="chuangkit"][src*="template"]',
+        'img[src*="cdn"][src*="design"]',
+        '.design-preview-container[style*="background-image"]',
+        '.work-preview-container[style*="background-image"]',
+        '.canvas-container[style*="background-image"]',
+        '[style*="background-image"]',
+      ];
+
+      for (const selector of designSelectors) {
+        const elements = $(selector);
+        for (let i = 0; i < elements.length; i++) {
+          const element = elements[i];
+          let imageUrl = null;
+
+          if (selector.includes('[style*="background-image"]')) {
+            const styleValue = $(element).attr("style");
+            const match = styleValue && styleValue.match(/url\(["']?([^"')]+)["']?\)/i);
+            if (match && match[1]) {
+              imageUrl = match[1].startsWith("http") ? match[1] : `https:${match[1]}`;
+            }
+          } else {
+            const imgSrc =
+              $(element).attr("src") ||
+              $(element).attr("data-src") ||
+              $(element).attr("data-original");
+            if (imgSrc) {
+              imageUrl = imgSrc.startsWith("http") ? imgSrc : `https:${imgSrc}`;
+            }
+          }
+
+          addStaticCandidate(imageUrl);
+        }
+      }
+
+      extractImageUrlsFromText(response.data ? response.data.toString() : "")
+        .filter((candidate) => scoreChuangkitCandidateUrl(candidate) >= 100)
+        .forEach(addStaticCandidate);
+
+      staticFallbackUrls = await collectValidatedChuangkitCandidates(staticCandidates, {
+        maxResults: isShareLink ? 12 : 6,
+      });
+
+      if (staticFallbackUrls.length > 1) {
+        console.log(`✅ 静态扫描命中创客贴套图，共 ${staticFallbackUrls.length} 张`);
+        return buildChuangkitResult(staticFallbackUrls, {
+          source: "static-scan",
+          quality: "high",
+          linkType,
+        });
+      }
+    } catch (staticError) {
+      console.warn("⚠️ 创客贴静态抓取失败:", staticError.message);
+    }
+
+    console.log("🤖 使用 Puppeteer 抓取创客贴主设计稿/套图...");
+    try {
+      const result = await scrapeChuangkit(url);
+      if (result) {
+        if (typeof result === "string" && result.startsWith("data:image")) {
+          return {
+            imageUrl: result,
+            platform: "Chuangkit",
+            source: "puppeteer-screenshot",
+            quality: "preview",
+            notice: "已截图完整设计稿，可能包含平台标识",
+            linkType,
+          };
+        }
+
+        const browserUrls =
+          typeof result === "object" && !Array.isArray(result)
+            ? dedupeChuangkitUrls([
+                ...(Array.isArray(result.imageUrls) ? result.imageUrls : []),
+                ...(Array.isArray(result.images) ? result.images : []),
+                result.imageUrl,
+                ...staticFallbackUrls,
+              ])
+            : typeof result === "string" && result.startsWith("http")
+              ? dedupeChuangkitUrls([result, ...staticFallbackUrls])
+              : [];
+
+        if (browserUrls.length > 0) {
+          console.log(`✅ Puppeteer 创客贴抓取成功，共 ${browserUrls.length} 张`);
+          return buildChuangkitResult(browserUrls, {
+            ...(typeof result === "object" && !Array.isArray(result) ? result : {}),
+            source:
+              typeof result === "object" && result && result.source
+                ? result.source
+                : "puppeteer-url",
+            quality:
+              typeof result === "object" && result && result.quality
+                ? result.quality
+                : "high",
+            linkType,
+          });
+        }
+      }
+    } catch (puppeteerError) {
+      console.warn("⚠️ Puppeteer 创客贴抓取失败:", puppeteerError.message);
+    }
+
+    if (staticFallbackUrls.length > 0) {
+      console.log("✅ 使用静态扫描结果作为创客贴回退");
+      return buildChuangkitResult(staticFallbackUrls, {
+        source: "static-fallback",
+        quality: "high",
+        linkType,
+      });
+    }
+
+    console.log("📡 尝试通用网络嗅探...");
+    try {
+      const genericResult = await scrapeWithBrowser(url);
+      if (typeof genericResult === "string" && genericResult.startsWith("http")) {
+        return buildChuangkitResult([genericResult], {
+          source: "generic-scrape",
+          quality: "medium",
+          linkType,
+        });
+      }
+    } catch (genericError) {
+      console.warn("⚠️ 通用网络嗅探失败:", genericError.message);
+    }
+
+    throw new Error(
+      `无法获取创客贴主设计稿。链接类型: ${
+        isShareLink ? "分享链接" : "设计稿链接"
+      }，可能需要登录或链接已失效`
+    );
+  } catch (error) {
+    console.error("❌ 提取创客贴主设计稿失败:", error.message);
+    throw error;
+  }
+}
+
 async function extractImage(url, platform) {
   console.log("\n=".repeat(60));
   console.log("🚀 开始提取图片");
   console.log(`   平台: ${platform}`);
   console.log(`   链接: ${url.substring(0, 100)}`);
   console.log("=".repeat(60));
+  const shouldPreferLocalChuangkit = isChuangkitTarget(url, platform);
+  let thirdPartyFallback = null;
 
   try {
     // ========== 阶段 1: 优先使用第三方 API 网关（命中率 80%+）==========
@@ -1080,12 +1480,40 @@ async function extractImage(url, platform) {
         thirdPartyResult.imageUrl
       ) {
         console.log("\n✅ 【成功】第三方 API 网关返回结果\n");
-        return {
-          ...thirdPartyResult,
-          imageUrl: thirdPartyResult.imageUrl,
-          platform: thirdPartyResult.platform || platform,
-          source: thirdPartyResult.source || "api-gateway",
-        };
+        const normalizedThirdPartyResult = shouldPreferLocalChuangkit
+          ? buildChuangkitResult(
+              [
+                ...(Array.isArray(thirdPartyResult.imageUrls)
+                  ? thirdPartyResult.imageUrls
+                  : []),
+                ...(Array.isArray(thirdPartyResult.images)
+                  ? thirdPartyResult.images
+                  : []),
+                thirdPartyResult.imageUrl,
+                thirdPartyResult.thumbnailUrl,
+              ],
+              {
+                ...thirdPartyResult,
+                platform: thirdPartyResult.platform || platform,
+                source: thirdPartyResult.source || "api-gateway",
+              }
+            )
+          : {
+              ...thirdPartyResult,
+              imageUrl: thirdPartyResult.imageUrl,
+              platform: thirdPartyResult.platform || platform,
+              source: thirdPartyResult.source || "api-gateway",
+            };
+
+        if (
+          !shouldPreferLocalChuangkit ||
+          normalizedThirdPartyResult.imageUrls.length > 1
+        ) {
+          return normalizedThirdPartyResult;
+        }
+
+        thirdPartyFallback = normalizedThirdPartyResult;
+        console.log("ℹ️ 创客贴第三方接口仅返回单张，继续尝试本地套图提取...");
       }
     } catch (error) {
       console.warn(`\n⚠️ 第三方 API 网关异常: ${error.message}`);
@@ -1096,7 +1524,11 @@ async function extractImage(url, platform) {
     let result = null;
 
     try {
-      if (platform === "818ps" && url.includes("818ps.com")) {
+      if (
+        platform === "818ps" ||
+        url.includes("818ps.com") ||
+        url.includes("tuguaishou.com")
+      ) {
         result = await extract818psImage(url);
       } else if (platform === "Canva" && url.includes("canva")) {
         result = await extractCanvaImage(url);
@@ -1109,10 +1541,10 @@ async function extractImage(url, platform) {
         result = await extractXiaohongshuImage(url);
       } else if (url.includes("chuangkit.com") || platform === "Chuangkit" || platform === "创客贴") {
         // 创客贴支持多种链接格式：设计稿、分享链接、模板等
-        result = await extractChuangkitImage(url);
+        result = await extractChuangkitImageEnhanced(url);
       } else if (url.includes("chuangkit")) {
         // 兜底：任何包含chuangkit的链接都尝试创客贴提取
-        result = await extractChuangkitImage(url);
+        result = await extractChuangkitImageEnhanced(url);
       }
 
       if (result && result.imageUrl) {
@@ -1126,6 +1558,11 @@ async function extractImage(url, platform) {
     // ========== 阶段 3: 最后兜底方案 ==========
     console.log("\n🔁 阶段 3: 尝试兜底方案...");
     console.log("❌ 所有主要方案都失败，无法获取真实图片URL");
+    if (thirdPartyFallback) {
+      console.log("\nℹ️ 创客贴本地套图未命中，回退第三方单图结果...\n");
+      return thirdPartyFallback;
+    }
+
     console.log("\n" + "=".repeat(60) + "\n");
 
     throw new Error(
@@ -1146,6 +1583,6 @@ module.exports = {
   extractCanvaImage,
   extractDouyinImage,
   extractXiaohongshuImage,
-  extractChuangkitImage,
+  extractChuangkitImage: extractChuangkitImageEnhanced,
   validateImageUrl,
 };

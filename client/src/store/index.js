@@ -5,6 +5,138 @@ const api = axios.create({
   baseURL: "/api",
 });
 
+function parseJsonField(value, fallback = []) {
+  if (Array.isArray(value)) {
+    return value;
+  }
+
+  if (typeof value !== "string" || !value.trim()) {
+    return fallback;
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function isBlockedPreviewAssetUrl(value) {
+  if (typeof value !== "string") {
+    return true;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+
+  if (/^data:image\//.test(normalized) || /^blob:/.test(normalized)) {
+    return false;
+  }
+
+  if (/^https?:\/\/hm\.baidu\.com\/hm\.gif/.test(normalized)) return true;
+  if (/googletagmanager|google-analytics|doubleclick|umeng|clarity/.test(normalized)) {
+    return true;
+  }
+  if (/\/distheadless\/img\//.test(normalized)) return true;
+  if (/full-screen|fullscreen|favicon|tracker|tracking|pixel/.test(normalized)) {
+    return true;
+  }
+
+  return false;
+}
+
+function normalizeRecord(record = {}) {
+  const imageUrls = [];
+  const seen = new Set();
+
+  const addUrl = (value) => {
+    if (typeof value !== "string") {
+      return;
+    }
+
+    const normalized = value.trim();
+    if (!normalized || isBlockedPreviewAssetUrl(normalized) || seen.has(normalized)) {
+      return;
+    }
+
+    seen.add(normalized);
+    imageUrls.push(normalized);
+  };
+
+  (record.imageUrls || []).forEach(addUrl);
+  (record.images || []).forEach(addUrl);
+  parseJsonField(record.image_urls_json).forEach(addUrl);
+  const rawPages = Array.isArray(record.pages)
+    ? record.pages
+    : parseJsonField(record.pages_json);
+
+  const pages = rawPages
+    .map((page, index) => ({
+      page: Number(page && page.page) || index + 1,
+      imageUrl:
+        typeof (page && page.imageUrl) === "string"
+          ? page.imageUrl.trim()
+          : "",
+    }))
+    .filter((page) => Boolean(page.imageUrl) && !isBlockedPreviewAssetUrl(page.imageUrl));
+
+  pages.forEach((page) => addUrl(page.imageUrl));
+  addUrl(record.imageUrl);
+  addUrl(record.thumbnailUrl || record.thumbnail_url);
+
+  const preferredThumbnailUrl =
+    !isBlockedPreviewAssetUrl(record.thumbnailUrl)
+      ? record.thumbnailUrl
+      : !isBlockedPreviewAssetUrl(record.thumbnail_url)
+        ? record.thumbnail_url
+        : pages[0]?.imageUrl || imageUrls[0] || "";
+
+  const preferredImageUrl =
+    !isBlockedPreviewAssetUrl(record.imageUrl)
+      ? record.imageUrl
+      : pages[0]?.imageUrl || imageUrls[0] || "";
+
+  if (!pages.length) {
+    imageUrls.forEach((imageUrl, index) => {
+      pages.push({
+        page: index + 1,
+        imageUrl,
+      });
+    });
+  }
+
+  const pageCount =
+    Number(record.pageCount || record.page_count) ||
+    imageUrls.length ||
+    pages.length ||
+    0;
+
+  const isMultiPage =
+    typeof record.isMultiPage === "boolean"
+      ? record.isMultiPage
+      : typeof record.is_multi_page === "boolean"
+        ? record.is_multi_page
+        : Number(record.is_multi_page || 0) === 1 || pageCount > 1;
+
+  return {
+    id: record.id,
+    originalUrl: record.originalUrl || record.original_url || "",
+    platform: record.platform || "Unknown",
+    thumbnailUrl: preferredThumbnailUrl,
+    imageUrl: preferredImageUrl,
+    imageUrls,
+    pages,
+    pageCount,
+    isMultiPage,
+    textLayers: record.textLayers || record.text_layers || [],
+    status: record.status || "success",
+    timestamp: record.timestamp || record.created_at || new Date().toISOString(),
+  };
+}
+
 export default createStore({
   state: {
     history: [],
@@ -36,18 +168,10 @@ export default createStore({
         commit("SET_LOADING", true);
         const { data } = await api.get("/history");
         if (data.success) {
-          // 转换数据库字段名为前端期望的格式
-          const formattedData = data.data.map((record) => ({
-            id: record.id,
-            originalUrl: record.original_url,
-            platform: record.platform,
-            thumbnailUrl: record.thumbnail_url,
-            // 如果后端提供了 textLayers，则保留到前端历史记录中
-            textLayers: record.text_layers || [],
-            status: record.status,
-            timestamp: record.created_at,
-          }));
-          commit("SET_HISTORY", formattedData);
+          commit(
+            "SET_HISTORY",
+            (data.data || []).map((record) => normalizeRecord(record))
+          );
         }
       } catch (error) {
         console.error("获取历史记录失败:", error);
@@ -57,7 +181,10 @@ export default createStore({
       }
     },
 
-    async parseUrl({ commit }, { url, platform, thumbnailUrl }) {
+    async parseUrl(
+      { commit },
+      { url, platform, thumbnailUrl, imageUrl, imageUrls, pages, pageCount, isMultiPage }
+    ) {
       try {
         commit("SET_LOADING", true);
         commit("SET_ERROR", null);
@@ -66,22 +193,16 @@ export default createStore({
           url,
           platform,
           thumbnailUrl,
+          imageUrl,
+          imageUrls,
+          pages,
+          pageCount,
+          isMultiPage,
           status: "success",
         });
 
         if (data.success) {
-          // 后端 parse 接口应返回 data.data 为新创建的记录对象
-          const rec = data.data;
-          // 保证兼容：把可能的 textLayers 规范到前端字段
-          const frontendRec = {
-            id: rec.id,
-            originalUrl: rec.original_url || url,
-            platform: rec.platform || platform,
-            thumbnailUrl: rec.thumbnail_url || thumbnailUrl,
-            textLayers: rec.text_layers || [],
-            status: rec.status || "success",
-            timestamp: rec.created_at || new Date().toISOString(),
-          };
+          const frontendRec = normalizeRecord(data.data);
           commit("ADD_RECORD", frontendRec);
           return frontendRec;
         }

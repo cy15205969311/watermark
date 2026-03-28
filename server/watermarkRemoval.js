@@ -1,7 +1,9 @@
 // 终极Hybrid去水印方案
 // 区域定位 + 方向性文字去除 + 多尺度补偿 + 纹理回填
+const fs = require("fs");
 const sharp = require("sharp");
 const path = require("path");
+const fsPromises = fs.promises;
 
 // 通道守护工具：统一颜色空间，避免后续阶段出现单通道/无通道异常
 function ensureRGB(sharpInstance) {
@@ -10,6 +12,373 @@ function ensureRGB(sharpInstance) {
 
 function guardBufferRGB(buffer) {
   return sharp(buffer).ensureAlpha().toColourspace("srgb").removeAlpha();
+}
+
+function normalizeOutputFormat(format, hasAlpha = false) {
+  const normalized = String(format || "").toLowerCase();
+
+  if (normalized === "jpg") {
+    return "jpeg";
+  }
+
+  if (["jpeg", "png", "webp"].includes(normalized)) {
+    return normalized;
+  }
+
+  return hasAlpha ? "png" : "jpeg";
+}
+
+function getMethodLabel(method) {
+  switch (String(method || "").toLowerCase()) {
+    case "auto":
+      return "智能自动";
+    case "hybrid":
+    case "default":
+      return "Hybrid方案";
+    case "advanced":
+      return "高级模式";
+    case "fast":
+      return "快速模式";
+    case "original":
+      return "原图";
+    default:
+      return "本地去水印";
+  }
+}
+
+function summarizeDetectionMap(detectionMap = {}) {
+  return {
+    hasBlackText: Boolean(detectionMap.hasBlackText),
+    hasTransparentLogo: Boolean(detectionMap.hasTransparentLogo),
+    edgeIntensity: Number(detectionMap.edgeIntensity || 0),
+  };
+}
+
+async function writeImageWithFormat(input, outputPath, metadata = {}) {
+  const format = normalizeOutputFormat(metadata.format, metadata.hasAlpha);
+  let pipeline = Buffer.isBuffer(input) ? sharp(input) : input;
+
+  pipeline = pipeline.rotate();
+
+  if (format === "jpeg") {
+    pipeline = pipeline.flatten({ background: "#ffffff" }).jpeg({
+      quality: 95,
+      mozjpeg: true,
+    });
+  } else if (format === "png") {
+    pipeline = pipeline.png({
+      compressionLevel: 9,
+      palette: false,
+      adaptiveFiltering: true,
+    });
+  } else {
+    pipeline = pipeline.webp({
+      quality: 95,
+      effort: 4,
+      smartSubsample: true,
+    });
+  }
+
+  await pipeline.toFile(outputPath);
+  return { format };
+}
+
+async function copyOriginalImage(inputPath, outputPath, metadata) {
+  const imageMetadata = metadata || (await sharp(inputPath).metadata());
+  const buffer = await sharp(inputPath).rotate().toBuffer();
+  return writeImageWithFormat(buffer, outputPath, imageMetadata);
+}
+
+async function collectImageMetrics(input) {
+  const image = Buffer.isBuffer(input) ? sharp(input) : sharp(input);
+  const metadata = await image.metadata();
+  const stats = await image.stats();
+  const channel = Array.isArray(stats.channels) ? stats.channels[0] || {} : {};
+  const maxSampleDimension = 512;
+  const sampleWidth = Number(metadata.width || 0);
+  const sampleHeight = Number(metadata.height || 0);
+
+  let samplePipeline = Buffer.isBuffer(input) ? sharp(input) : sharp(input);
+  if (
+    sampleWidth > maxSampleDimension ||
+    sampleHeight > maxSampleDimension
+  ) {
+    samplePipeline =
+      sampleWidth >= sampleHeight
+        ? samplePipeline.resize({ width: maxSampleDimension })
+        : samplePipeline.resize({ height: maxSampleDimension });
+  }
+
+  const { data: grayPixels, info: grayInfo } = await samplePipeline
+    .greyscale()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  let fileSize = 0;
+  if (Buffer.isBuffer(input)) {
+    fileSize = input.length;
+  } else {
+    try {
+      const fileStat = await fsPromises.stat(input);
+      fileSize = Number(fileStat.size || 0);
+    } catch {
+      fileSize = 0;
+    }
+  }
+
+  let gradientSum = 0;
+  let laplacianSum = 0;
+  let highlightCount = 0;
+  let shadowCount = 0;
+  const totalPixels = Math.max(1, grayInfo.width * grayInfo.height);
+  const edgePixels = Math.max(1, (grayInfo.width - 2) * (grayInfo.height - 2));
+
+  for (let index = 0; index < totalPixels; index += 1) {
+    const value = grayPixels[index] || 0;
+    if (value >= 220) {
+      highlightCount += 1;
+    }
+    if (value <= 40) {
+      shadowCount += 1;
+    }
+  }
+
+  for (let y = 1; y < grayInfo.height - 1; y += 1) {
+    for (let x = 1; x < grayInfo.width - 1; x += 1) {
+      const index = y * grayInfo.width + x;
+      const gx = Math.abs((grayPixels[index + 1] || 0) - (grayPixels[index - 1] || 0));
+      const gy = Math.abs((grayPixels[index + grayInfo.width] || 0) - (grayPixels[index - grayInfo.width] || 0));
+      const laplacian = Math.abs(
+        ((grayPixels[index - 1] || 0) +
+          (grayPixels[index + 1] || 0) +
+          (grayPixels[index - grayInfo.width] || 0) +
+          (grayPixels[index + grayInfo.width] || 0)) -
+          4 * (grayPixels[index] || 0)
+      );
+
+      gradientSum += gx + gy;
+      laplacianSum += laplacian;
+    }
+  }
+
+  return {
+    width: Number(metadata.width || 0),
+    height: Number(metadata.height || 0),
+    format: normalizeOutputFormat(metadata.format, metadata.hasAlpha),
+    hasAlpha: Boolean(metadata.hasAlpha),
+    fileSize,
+    mean: Number(channel.mean || 0),
+    stdev: Number(channel.stdev || 0),
+    entropy: Number(channel.entropy || 0),
+    highlightPct: highlightCount / totalPixels,
+    shadowPct: shadowCount / totalPixels,
+    avgGradient: gradientSum / edgePixels,
+    avgLaplacian: laplacianSum / edgePixels,
+  };
+}
+
+function assessProcessedMetrics(originalMetrics = {}, candidateMetrics = {}) {
+  const brightnessDelta = candidateMetrics.mean - originalMetrics.mean;
+  const contrastRatio =
+    originalMetrics.stdev > 0
+      ? candidateMetrics.stdev / originalMetrics.stdev
+      : 1;
+  const entropyRatio =
+    originalMetrics.entropy > 0
+      ? candidateMetrics.entropy / originalMetrics.entropy
+      : 1;
+  const gradientRatio =
+    originalMetrics.avgGradient > 0
+      ? candidateMetrics.avgGradient / originalMetrics.avgGradient
+      : 1;
+  const laplacianRatio =
+    originalMetrics.avgLaplacian > 0
+      ? candidateMetrics.avgLaplacian / originalMetrics.avgLaplacian
+      : 1;
+  const highlightDelta =
+    Number(candidateMetrics.highlightPct || 0) -
+    Number(originalMetrics.highlightPct || 0);
+  const fileSizeRatio =
+    originalMetrics.fileSize > 0
+      ? candidateMetrics.fileSize / originalMetrics.fileSize
+      : 1;
+
+  let score = 100;
+
+  if (brightnessDelta > 8) {
+    score -= Math.min(34, (brightnessDelta - 8) * 2.2);
+  } else if (brightnessDelta < -18) {
+    score -= Math.min(20, (Math.abs(brightnessDelta) - 18) * 0.9);
+  }
+
+  if (contrastRatio < 0.8) {
+    score -= Math.min(48, (0.8 - contrastRatio) * 120);
+  } else if (contrastRatio > 1.7) {
+    score -= Math.min(18, (contrastRatio - 1.7) * 45);
+  }
+
+  if (gradientRatio < 0.78) {
+    score -= Math.min(52, (0.78 - gradientRatio) * 135);
+  } else if (gradientRatio > 2.8) {
+    score -= Math.min(18, (gradientRatio - 2.8) * 20);
+  }
+
+  if (laplacianRatio < 0.72) {
+    score -= Math.min(52, (0.72 - laplacianRatio) * 130);
+  } else if (laplacianRatio > 3.4) {
+    score -= Math.min(16, (laplacianRatio - 3.4) * 12);
+  }
+
+  if (highlightDelta > 0.04) {
+    score -= Math.min(28, highlightDelta * 220);
+  }
+
+  if (fileSizeRatio < 0.58) {
+    score -= Math.min(18, (0.58 - fileSizeRatio) * 45);
+  }
+
+  if (entropyRatio < 0.6) {
+    score -= Math.min(25, (0.6 - entropyRatio) * 80);
+  }
+
+  if (
+    candidateMetrics.width !== originalMetrics.width ||
+    candidateMetrics.height !== originalMetrics.height
+  ) {
+    score -= 40;
+  }
+
+  const maxAllowedMean =
+    originalMetrics.mean > 180 ? originalMetrics.mean + 8 : originalMetrics.mean + 14;
+  const issues = [];
+
+  if (brightnessDelta > 8) {
+    issues.push("整体偏亮");
+  } else if (brightnessDelta < -18) {
+    issues.push("整体偏暗");
+  }
+
+  if (contrastRatio < 0.8) {
+    issues.push("对比度下降");
+  }
+
+  if (gradientRatio < 0.78) {
+    issues.push("边缘细节丢失");
+  }
+
+  if (laplacianRatio < 0.72) {
+    issues.push("纹理锐度不足");
+  }
+
+  if (highlightDelta > 0.04) {
+    issues.push("高光溢出");
+  }
+
+  if (fileSizeRatio < 0.58) {
+    issues.push("细节压缩过多");
+  }
+
+  if (entropyRatio < 0.6) {
+    issues.push("纹理信息不足");
+  }
+
+  if (candidateMetrics.mean > Math.min(240, maxAllowedMean)) {
+    issues.push("亮度超出安全范围");
+  } else if (candidateMetrics.mean < 35) {
+    issues.push("亮度过低");
+  }
+
+  if (
+    candidateMetrics.width !== originalMetrics.width ||
+    candidateMetrics.height !== originalMetrics.height
+  ) {
+    issues.push("输出尺寸异常");
+  }
+
+  const acceptable =
+    score >= 60 &&
+    candidateMetrics.mean >= 35 &&
+    candidateMetrics.mean <= Math.min(240, maxAllowedMean) &&
+    contrastRatio >= 0.72 &&
+    gradientRatio >= 0.7 &&
+    laplacianRatio >= 0.58 &&
+    entropyRatio >= 0.45;
+
+  return {
+    score: Math.max(0, Math.round(score)),
+    acceptable,
+    brightnessDelta: Number(brightnessDelta.toFixed(2)),
+    contrastRatio: Number(contrastRatio.toFixed(3)),
+    entropyRatio: Number(entropyRatio.toFixed(3)),
+    gradientRatio: Number(gradientRatio.toFixed(3)),
+    laplacianRatio: Number(laplacianRatio.toFixed(3)),
+    highlightDelta: Number(highlightDelta.toFixed(4)),
+    fileSizeRatio: Number(fileSizeRatio.toFixed(3)),
+    issues,
+    summary: acceptable
+      ? issues.length
+        ? `通过质量检查，但需关注：${issues.join("、")}`
+        : "通过质量检查，亮度和细节保持稳定"
+      : issues.length
+        ? `未通过质量检查：${issues.join("、")}`
+        : "未通过质量检查：综合质量不足",
+  };
+}
+
+function normalizeLocalMethod(method) {
+  const normalized = String(method || "auto").toLowerCase();
+
+  if (normalized === "default") {
+    return "hybrid";
+  }
+
+  if (["auto", "hybrid", "advanced", "fast"].includes(normalized)) {
+    return normalized;
+  }
+
+  return "auto";
+}
+
+function buildAutoMethodPlan(metadata = {}, detectionMap = {}) {
+  const megapixels =
+    (Number(metadata.width || 0) * Number(metadata.height || 0)) / 1_000_000;
+  const plan = [];
+
+  if (detectionMap.hasTransparentLogo && !detectionMap.hasBlackText) {
+    plan.push("advanced", "hybrid", "fast");
+  } else if (
+    !detectionMap.hasBlackText &&
+    !detectionMap.hasTransparentLogo &&
+    Number(detectionMap.edgeIntensity || 0) < 25 &&
+    megapixels <= 1.5
+  ) {
+    // 明亮长图/海报类更容易被 Hybrid 过度抹平，优先尝试更稳的模式。
+    plan.push("advanced", "fast", "hybrid");
+  } else if (megapixels >= 4 || Number(detectionMap.edgeIntensity || 0) >= 45) {
+    plan.push("hybrid", "advanced", "fast");
+  } else {
+    plan.push("advanced", "hybrid", "fast");
+  }
+
+  return [...new Set(plan)];
+}
+
+function buildCandidateOutputPath(outputPath, method) {
+  const ext = path.extname(outputPath) || ".jpg";
+  const base = path.basename(outputPath, ext);
+  return path.join(path.dirname(outputPath), `${base}.${method}.tmp${ext}`);
+}
+
+async function safeDeleteFile(filePath) {
+  if (!filePath) {
+    return;
+  }
+
+  try {
+    await fsPromises.unlink(filePath);
+  } catch {
+    // Ignore cleanup errors.
+  }
 }
 
 /**
@@ -116,7 +485,9 @@ async function removeWatermark(inputPath, outputPath) {
 
     const cornerMaskSharp = await sharp(cornerMask, {
       raw: { width, height, channels: 1 }
-    }).toBuffer();
+    })
+      .png()
+      .toBuffer();
 
     // 结合角落区域和边缘检测
     const platformSpecificMask = await sharp(strongEdges)
@@ -456,16 +827,28 @@ async function removeWatermark(inputPath, outputPath) {
     }
 
     // === 步骤6: 输出保存 ===
-    await sharp(merged).jpeg({ quality: 95, mozjpeg: true }).toFile(outputPath);
+    const { format } = await writeImageWithFormat(merged, outputPath, meta);
 
     console.log("✅ 推荐模式(方案A)完成:", outputPath);
-    return { success: true, method: "multi-feature-fusion" };
+    return {
+      success: true,
+      method: "hybrid",
+      engine: "multi-feature-fusion",
+      label: getMethodLabel("hybrid"),
+      outputFormat: format,
+    };
   } catch (error) {
     console.error("❌ 推荐模式(方案A)失败:", error.message);
     console.error(error.stack);
     try {
-      await sharp(inputPath).toFile(outputPath);
-      return { success: false, method: "fallback", message: "使用原图" };
+      const { format } = await copyOriginalImage(inputPath, outputPath);
+      return {
+        success: false,
+        method: "original",
+        label: getMethodLabel("original"),
+        outputFormat: format,
+        message: "使用原图",
+      };
     } catch (fallbackError) {
       throw new Error("推荐模式失败且原图备份失败");
     }
@@ -1332,17 +1715,28 @@ async function removeWatermarkFast(inputPath, outputPath) {
   try {
     console.log("⚡ 使用快速模式处理...");
 
-    await sharp(inputPath)
+    const metadata = await sharp(inputPath).metadata();
+    const processedBuffer = await sharp(inputPath)
       .blur(1.8)
       .sharpen()
       .modulate({ brightness: 1.05, saturation: 1.12 })
       .linear(1.05, -5)
       .median(2)
-      .jpeg({ quality: 92 })
-      .toFile(outputPath);
+      .toBuffer();
+
+    const { format } = await writeImageWithFormat(
+      processedBuffer,
+      outputPath,
+      metadata
+    );
 
     console.log("✅ 快速模式完成");
-    return { success: true, method: "fast" };
+    return {
+      success: true,
+      method: "fast",
+      label: getMethodLabel("fast"),
+      outputFormat: format,
+    };
   } catch (error) {
     console.error("❌ 快速模式失败");
     throw error;
@@ -1358,29 +1752,202 @@ async function removeWatermarkAdvanced(inputPath, outputPath) {
 
     const metadata = await sharp(inputPath).metadata();
     const detectionResult = await detectWatermarkRegions(inputPath, metadata);
-    const processedBuffer = await regionalDeepRemoval(
+    let processedBuffer = await regionalDeepRemoval(
       inputPath,
       detectionResult,
       metadata
     );
 
-    // 简化的后处理
-    await sharp(processedBuffer)
-      .sharpen()
-      .modulate({ brightness: 1.04 })
-      .jpeg({ quality: 94 })
-      .toFile(outputPath);
+    processedBuffer = await textureInpainting(processedBuffer, metadata);
+    processedBuffer = await exposureOptimization(
+      processedBuffer,
+      inputPath,
+      detectionResult,
+      metadata
+    );
+
+    const finalizedBuffer = await sharp(processedBuffer)
+      .sharpen({ sigma: 0.8, m1: 0.6, m2: 0.6 })
+      .modulate({ brightness: 1.02, saturation: 1.04 })
+      .median(1)
+      .toBuffer();
+
+    const { format } = await writeImageWithFormat(
+      finalizedBuffer,
+      outputPath,
+      metadata
+    );
 
     console.log("✅ 高级模式完成");
-    return { success: true, method: "advanced" };
+    return {
+      success: true,
+      method: "advanced",
+      label: getMethodLabel("advanced"),
+      outputFormat: format,
+      detection: summarizeDetectionMap(detectionResult),
+    };
   } catch (error) {
     console.error("❌ 高级模式失败");
     throw error;
   }
 }
 
+async function removeWatermarkAuto(inputPath, outputPath) {
+  console.log("🤖 使用智能自动模式处理...");
+
+  const metadata = await sharp(inputPath).metadata();
+  const detectionResult = await detectWatermarkRegions(inputPath, metadata);
+  const originalMetrics = await collectImageMetrics(inputPath);
+  const methodPlan = buildAutoMethodPlan(metadata, detectionResult);
+  const methodOrder = new Map(methodPlan.map((method, index) => [method, index]));
+  const attempts = [];
+  const tempPaths = [];
+  let bestCandidate = null;
+  let usableFallback = null;
+
+  for (const method of methodPlan) {
+    const candidatePath = buildCandidateOutputPath(outputPath, method);
+    tempPaths.push(candidatePath);
+
+    try {
+      let result;
+      if (method === "advanced") {
+        result = await removeWatermarkAdvanced(inputPath, candidatePath);
+      } else if (method === "fast") {
+        result = await removeWatermarkFast(inputPath, candidatePath);
+      } else {
+        result = await removeWatermark(inputPath, candidatePath);
+      }
+
+      if (!result || result.success === false || result.method === "original") {
+        attempts.push({
+          method,
+          success: false,
+          message: result && result.message ? result.message : "处理结果不可用",
+        });
+        continue;
+      }
+
+      const processedMetrics = await collectImageMetrics(candidatePath);
+      const assessment = assessProcessedMetrics(
+        originalMetrics,
+        processedMetrics
+      );
+      const assessmentNote = assessment.issues.length
+        ? `，原因=${assessment.issues.join(" / ")}`
+        : "";
+
+      console.log(
+        `   [自动评估] ${getMethodLabel(method)}: ${
+          assessment.acceptable ? "通过" : "淘汰"
+        }，score=${assessment.score}，亮度Δ=${assessment.brightnessDelta}，对比=${assessment.contrastRatio}，梯度=${assessment.gradientRatio}，拉普拉斯=${assessment.laplacianRatio}${assessmentNote}`
+      );
+      const candidate = {
+        method,
+        path: candidatePath,
+        result,
+        assessment,
+        order: methodOrder.get(method) ?? Number.MAX_SAFE_INTEGER,
+      };
+
+      attempts.push({
+        method,
+        success: assessment.acceptable,
+        score: assessment.score,
+        brightnessDelta: assessment.brightnessDelta,
+        contrastRatio: assessment.contrastRatio,
+        entropyRatio: assessment.entropyRatio,
+        gradientRatio: assessment.gradientRatio,
+        laplacianRatio: assessment.laplacianRatio,
+        highlightDelta: assessment.highlightDelta,
+        fileSizeRatio: assessment.fileSizeRatio,
+        issues: assessment.issues,
+        summary: assessment.summary,
+      });
+
+      if (
+        !usableFallback ||
+        assessment.score > usableFallback.assessment.score ||
+        (Math.abs(assessment.score - usableFallback.assessment.score) <= 4 &&
+          candidate.order < usableFallback.order)
+      ) {
+        usableFallback = candidate;
+      }
+
+      if (
+        assessment.acceptable &&
+        (
+          !bestCandidate ||
+          assessment.score > bestCandidate.assessment.score + 4 ||
+          (Math.abs(assessment.score - bestCandidate.assessment.score) <= 4 &&
+            candidate.order < bestCandidate.order)
+        )
+      ) {
+        bestCandidate = candidate;
+      }
+    } catch (error) {
+      attempts.push({
+        method,
+        success: false,
+        message: error.message,
+      });
+    }
+  }
+
+  const chosenCandidate = bestCandidate || usableFallback;
+
+  if (chosenCandidate) {
+    await fsPromises.copyFile(chosenCandidate.path, outputPath);
+
+    for (const tempPath of tempPaths) {
+      await safeDeleteFile(tempPath);
+    }
+
+    console.log(
+      `✅ 智能自动模式完成，命中 ${getMethodLabel(chosenCandidate.method)}`
+    );
+
+    return {
+      success: true,
+      method: chosenCandidate.method,
+      requestedMethod: "auto",
+      label: getMethodLabel(chosenCandidate.method),
+      mode: "auto",
+      fallbackUsed: chosenCandidate.method !== methodPlan[0],
+      attemptedMethods: attempts,
+      detection: summarizeDetectionMap(detectionResult),
+      outputFormat:
+        chosenCandidate.result && chosenCandidate.result.outputFormat
+          ? chosenCandidate.result.outputFormat
+          : normalizeOutputFormat(metadata.format, metadata.hasAlpha),
+      qualityScore: chosenCandidate.assessment.score,
+      selectionReason: chosenCandidate.assessment.summary,
+    };
+  }
+
+  const { format } = await copyOriginalImage(inputPath, outputPath, metadata);
+  for (const tempPath of tempPaths) {
+    await safeDeleteFile(tempPath);
+  }
+
+  return {
+    success: false,
+    method: "original",
+    requestedMethod: "auto",
+    label: getMethodLabel("original"),
+    mode: "auto",
+    fallbackUsed: true,
+    attemptedMethods: attempts,
+    detection: summarizeDetectionMap(detectionResult),
+    outputFormat: format,
+    selectionReason: "所有候选结果都未通过质量检查，已回退到原图",
+    message: "所有自动去水印算法都失败，已回退到原图",
+  };
+}
+
 module.exports = {
   removeWatermark, // 主函数：终极Hybrid方案
   removeWatermarkAdvanced, // 高级模式（Hybrid简化版）
   removeWatermarkFast, // 快速模式
+  removeWatermarkAuto, // 智能自动模式
 };

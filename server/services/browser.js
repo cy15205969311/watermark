@@ -748,8 +748,1127 @@ module.exports = {
   scrapeCanva,
   scrapeDouyin,
   scrapeXiaohongshu,
-  scrapeChuangkit,
+  scrapeChuangkit: scrapeChuangkitEnhanced,
 };
+
+function normalizeChuangkitImageUrl(url) {
+  if (typeof url !== "string") {
+    return null;
+  }
+
+  const normalized = url.trim().replace(/\\/g, "/");
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized.startsWith("//")) {
+    return `https:${normalized}`;
+  }
+
+  return normalized;
+}
+
+function isBlockedChuangkitAssetUrl(url) {
+  const normalized = normalizeChuangkitImageUrl(url);
+  if (!normalized) {
+    return true;
+  }
+
+  const lower = normalized.toLowerCase();
+  if (/^data:image\//.test(lower) || /^blob:/.test(lower)) {
+    return false;
+  }
+
+  if (/^https?:\/\/hm\.baidu\.com\/hm\.gif/.test(lower)) return true;
+  if (/googletagmanager|google-analytics|doubleclick|umeng|clarity/.test(lower)) {
+    return true;
+  }
+  if (/\/distheadless\/img\//.test(lower)) return true;
+  if (/full-screen|fullscreen|favicon|tracker|tracking|pixel/.test(lower)) {
+    return true;
+  }
+  if (/\.gif(?:$|\?)/.test(lower)) return true;
+  if (/\.svg(?:$|\?)/.test(lower) && !/svg_build\/render_result/.test(lower)) {
+    return true;
+  }
+
+  return false;
+}
+
+async function scrapeChuangkitEnhanced(pageUrl) {
+  let browser;
+  try {
+    console.log("🧩 开始创客贴精确设计稿抓取:", pageUrl);
+
+    const launchOptions = {
+      headless: "new",
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-web-security",
+        "--disable-features=VizDisplayCompositor",
+      ],
+    };
+    if (executablePath) {
+      launchOptions.executablePath = executablePath;
+    }
+
+    browser = await puppeteer.launch(launchOptions);
+
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1920, height: 1080, deviceScaleFactor: 2 });
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    );
+    await page.setExtraHTTPHeaders({
+      Referer: "https://www.chuangkit.com/",
+      Origin: "https://www.chuangkit.com",
+    });
+
+    let bestDesignImageUrl = null;
+    let maxDesignScore = 0;
+    const capturedImages = new Map();
+    let captureSequence = 0;
+
+    const captureCandidate = (rawUrl, options = {}) => {
+      const normalized = normalizeChuangkitImageUrl(rawUrl);
+      if (!normalized || isBlockedChuangkitAssetUrl(normalized)) {
+        return;
+      }
+
+      const size = Number(options.size) || 0;
+      const score =
+        scoreChuangkitDesignUrl(normalized, size) + (Number(options.scoreBoost) || 0);
+      if (score < 900) {
+        return;
+      }
+
+      const existing = capturedImages.get(normalized);
+      const pageHint =
+        Number.isFinite(options.pageHint) && options.pageHint > 0
+          ? options.pageHint
+          : existing && Number.isFinite(existing.pageHint)
+            ? existing.pageHint
+            : extractChuangkitPageHint(normalized);
+      const domIndex =
+        Number.isFinite(options.domIndex) && options.domIndex >= 0
+          ? options.domIndex
+          : existing && Number.isFinite(existing.domIndex)
+            ? existing.domIndex
+            : null;
+
+      const next = {
+        url: normalized,
+        score: existing ? Math.max(existing.score, score) : score,
+        size: existing ? Math.max(existing.size || 0, size) : size,
+        source: options.source || (existing && existing.source) || "network",
+        order: existing ? existing.order : captureSequence++,
+        pageHint,
+        domIndex,
+      };
+
+      capturedImages.set(normalized, next);
+
+      if (score > maxDesignScore) {
+        maxDesignScore = score;
+        bestDesignImageUrl = normalized;
+      }
+
+      if ((!existing || score > existing.score) && score >= 1000) {
+        console.log(`🎨 发现设计稿候选: ${Math.round(size / 1024)}KB, 评分:${Math.round(score)}`);
+        console.log(`   URL: ${normalized.substring(0, 100)}...`);
+      }
+    };
+
+    const collectInlineCandidates = async (source, scoreBoost) => {
+      try {
+        const pageContent = await page.content();
+        extractChuangkitImageUrlsFromText(pageContent).forEach((candidateUrl) => {
+          captureCandidate(candidateUrl, {
+            source,
+            scoreBoost,
+          });
+        });
+      } catch (error) {
+        // Ignore page content parsing failures.
+      }
+    };
+
+    await page.setRequestInterception(true);
+    page.on("request", (req) => {
+      const resourceType = req.resourceType();
+      if (["font", "media"].includes(resourceType)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+
+    page.on("response", async (response) => {
+      const url = response.url();
+      const headers = response.headers();
+      const contentType = headers["content-type"] || "";
+
+      if (contentType.startsWith("image/")) {
+        try {
+          captureCandidate(url, {
+            size: parseInt(headers["content-length"] || "0", 10),
+            source: "response-image",
+          });
+        } catch (error) {
+          // Ignore single response parsing failures.
+        }
+        return;
+      }
+
+      const responseUrlLower = url.toLowerCase();
+      const shouldInspectText =
+        contentType.includes("application/json") ||
+        contentType.includes("text/json") ||
+        (contentType.includes("javascript") &&
+          /share|template|design|page|preview|render/.test(responseUrlLower));
+
+      if (!shouldInspectText) {
+        return;
+      }
+
+      try {
+        const text = await response.text();
+        extractChuangkitImageUrlsFromText(text).forEach((candidateUrl) => {
+          captureCandidate(candidateUrl, {
+            size: parseInt(headers["content-length"] || "0", 10),
+            source: "response-text",
+            scoreBoost: 120,
+          });
+        });
+      } catch (error) {
+        // Ignore text response parsing failures.
+      }
+    });
+
+    console.log("🌐 正在加载创客贴页面并拦截图片请求...");
+    await page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+    await page.waitForTimeout(1200);
+    await collectInlineCandidates("page-content-initial", 140);
+
+    const initialDomCandidates = await collectChuangkitDomCandidates(page);
+    initialDomCandidates.forEach((candidate, index) => {
+      captureCandidate(candidate.url, {
+        source: "dom-initial",
+        scoreBoost: 180,
+        pageHint: candidate.pageHint,
+        domIndex: index,
+      });
+    });
+
+    const traversedGalleryCount = await traverseChuangkitGallery(page);
+    if (traversedGalleryCount > 1) {
+      console.log(`🖼️ 尝试遍历创客贴套图缩略图: ${traversedGalleryCount} 个候选页`);
+      await page.waitForTimeout(1800);
+    }
+
+    const galleryDomCandidates = await collectChuangkitDomCandidates(page);
+    galleryDomCandidates.forEach((candidate, index) => {
+      captureCandidate(candidate.url, {
+        source: "dom-gallery",
+        scoreBoost: 220,
+        pageHint: candidate.pageHint,
+        domIndex: index,
+      });
+    });
+
+    await page.addStyleTag({
+      content: `
+        header, nav, .header, .nav, .navbar, .navigation,
+        footer, .footer, .bottom, .sidebar, .side-panel,
+        .toolbar, .menu, .breadcrumb, .pagination,
+        .ck-header, .ck-nav, .ck-toolbar, .ck-sidebar,
+        .ck-footer, .ck-menu, .ck-panel, .ck-controls,
+        [class*="watermark"], [class*="mark"], [class*="overlay"], [class*="mask"],
+        [id*="watermark"], [id*="mark"], [id*="overlay"], [id*="mask"],
+        .wm, .copyright, .logo, .brand, .watermark-layer, .mark-layer,
+        [class*="logo"], [class*="brand"], [class*="copyright"],
+        .preview-mask, .design-mask, .template-mask,
+        .ck-watermark, .ck-mask, .ck-overlay, .ck-logo,
+        .template-watermark, .design-watermark, .work-watermark,
+        [class*="chuangkit"][class*="watermark"],
+        [class*="chuangkit"][class*="logo"],
+        [class*="chuangkit"][class*="mark"],
+        .chuangkit-watermark, .chuangkit-logo, .chuangkit-mark,
+        svg[class*="watermark"], svg[class*="logo"], svg[class*="mark"],
+        [class*="text-watermark"], [class*="text-mark"],
+        .text-overlay, .text-mask {
+          display: none !important;
+          opacity: 0 !important;
+          visibility: hidden !important;
+          pointer-events: none !important;
+          width: 0 !important;
+          height: 0 !important;
+        }
+
+        .design-content, .work-content, .template-content,
+        .preview-content, .canvas-content, .main-design,
+        .design-area, .work-area, .canvas-area {
+          opacity: 1 !important;
+          visibility: visible !important;
+          position: relative !important;
+          z-index: 9999 !important;
+        }
+
+        body { background: transparent !important; }
+        .page-bg, .background, .bg { display: none !important; }
+      `,
+    });
+
+    await page.evaluate(() => {
+      const removeKeywords = [
+        "header",
+        "nav",
+        "footer",
+        "sidebar",
+        "toolbar",
+        "menu",
+        "watermark",
+        "mark",
+        "logo",
+        "brand",
+        "copyright",
+        "ui",
+        "button",
+        "control",
+        "panel",
+        "overlay",
+        "mask",
+      ];
+
+      document.querySelectorAll("*").forEach((el) => {
+        try {
+          let className = "";
+          let id = "";
+          const tagName = el.tagName ? el.tagName.toLowerCase() : "";
+
+          if (el.className) {
+            if (typeof el.className === "string") {
+              className = el.className.toLowerCase();
+            } else if (el.className.baseVal) {
+              className = el.className.baseVal.toLowerCase();
+            }
+          }
+
+          if (el.id && typeof el.id === "string") {
+            id = el.id.toLowerCase();
+          }
+
+          const isNonDesignElement = removeKeywords.some(
+            (keyword) =>
+              className.includes(keyword) ||
+              id.includes(keyword) ||
+              tagName.includes(keyword)
+          );
+
+          if (isNonDesignElement) {
+            el.remove();
+            return;
+          }
+
+          const computedStyle = window.getComputedStyle(el);
+          const backgroundImage = computedStyle.backgroundImage;
+          if (backgroundImage && backgroundImage !== "none") {
+            const bgUrl = backgroundImage.toLowerCase();
+            if (removeKeywords.some((keyword) => bgUrl.includes(keyword))) {
+              el.style.backgroundImage = "none";
+            }
+          }
+
+          if (el.childNodes.length === 1 && el.childNodes[0].nodeType === 3) {
+            const text = (el.textContent || "").toLowerCase();
+            if (removeKeywords.some((keyword) => text.includes(keyword))) {
+              el.remove();
+              return;
+            }
+          }
+
+          const position = computedStyle.position;
+          if (position === "absolute" || position === "fixed") {
+            const rect = el.getBoundingClientRect();
+            const zIndex = parseInt(computedStyle.zIndex, 10) || 0;
+            if (rect.width < 300 && rect.height < 150 && zIndex > 100) {
+              el.remove();
+            }
+          }
+        } catch (error) {
+          // Ignore cleanup failures.
+        }
+      });
+
+      document.querySelectorAll("*").forEach((el) => {
+        try {
+          const computedStyle = window.getComputedStyle(el);
+          const opacity = parseFloat(computedStyle.opacity);
+          if (opacity > 0 && opacity < 0.3) {
+            const rect = el.getBoundingClientRect();
+            if (rect.width < 400 && rect.height < 200) {
+              el.remove();
+            }
+          }
+        } catch (error) {
+          // Ignore cleanup failures.
+        }
+      });
+    });
+
+    await page.evaluate(async () => {
+      window.scrollTo(0, 0);
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+      for (let i = 0; i < 3; i++) {
+        window.scrollBy(0, window.innerHeight / 2);
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+
+      window.scrollTo(0, 0);
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    });
+
+    await page.waitForTimeout(3000);
+    await collectInlineCandidates("page-content-post", 160);
+
+    const postCleanupDomCandidates = await collectChuangkitDomCandidates(page);
+    postCleanupDomCandidates.forEach((candidate, index) => {
+      captureCandidate(candidate.url, {
+        source: "dom-post",
+        scoreBoost: 220,
+        pageHint: candidate.pageHint,
+        domIndex: index,
+      });
+    });
+
+    const orderedImageUrls = buildOrderedChuangkitUrls(capturedImages, [
+      ...initialDomCandidates,
+      ...galleryDomCandidates,
+      ...postCleanupDomCandidates,
+    ]);
+
+    if (orderedImageUrls.length > 1) {
+      console.log(`✅ 创客贴套图抓取成功，共 ${orderedImageUrls.length} 张`);
+      await browser.close();
+      return buildChuangkitResult(orderedImageUrls, {
+        source: "puppeteer-url",
+        quality: "high",
+      });
+    }
+
+    if (bestDesignImageUrl && maxDesignScore > 1000) {
+      console.log(`✅ 网络拦截获取到高质量设计稿 URL (评分:${Math.round(maxDesignScore)})`);
+      console.log(`🎯 设计稿 URL: ${bestDesignImageUrl}`);
+      await browser.close();
+      return buildChuangkitResult([bestDesignImageUrl], {
+        source: "puppeteer-url",
+        quality: "high",
+      });
+    }
+
+    const preciseDesignSelectors = [
+      ".design-preview-main",
+      ".work-preview-main",
+      ".template-preview-main",
+      ".main-design-container",
+      ".design-canvas-main",
+      ".work-canvas-main",
+      ".design-preview-area",
+      ".work-preview-area",
+      ".template-preview-area",
+      ".preview-main-area",
+      ".canvas-preview-area",
+      ".design-content-container",
+      ".work-content-container",
+      ".template-content-container",
+      ".main-content-area",
+      ".design-canvas-container",
+      ".work-canvas-container",
+      ".main-canvas-container",
+      ".canvas-wrapper-main",
+      ".design-main",
+      ".work-main",
+      ".template-main",
+      ".preview-main",
+      ".canvas-main",
+      ".content-main",
+      ".ck-design-main",
+      ".ck-work-main",
+      ".ck-preview-main",
+      ".ck-canvas-main",
+      ".ck-content-main",
+    ];
+
+    console.log("🎯 开始精确定位设计稿容器...");
+    const bestDesignContainer = await page.evaluate((selectors) => {
+      function calculateDesignScore(element) {
+        const rect = element.getBoundingClientRect();
+        const area = rect.width * rect.height;
+        let score = area;
+
+        if (rect.width < 200 || rect.height < 200) score -= 2000;
+        if (rect.width > 300 && rect.height > 300) score += 1000;
+        if (rect.width > 500 && rect.height > 500) score += 2000;
+
+        const centerX = window.innerWidth / 2;
+        const centerY = window.innerHeight / 2;
+        const elementCenterX = rect.left + rect.width / 2;
+        const elementCenterY = rect.top + rect.height / 2;
+        const distanceFromCenter = Math.sqrt(
+          Math.pow(elementCenterX - centerX, 2) +
+            Math.pow(elementCenterY - centerY, 2)
+        );
+        score += Math.max(0, 2000 - distanceFromCenter);
+
+        const ratio = rect.width / rect.height;
+        if ((ratio > 0.5 && ratio < 0.9) || (ratio > 1.1 && ratio < 2.0)) {
+          score += 1500;
+        }
+
+        const images = element.querySelectorAll("img");
+        const texts = element.querySelectorAll("p, span, h1, h2, h3, h4, h5, div");
+        const canvases = element.querySelectorAll("canvas");
+        const svgs = element.querySelectorAll("svg");
+
+        score += images.length * 300;
+        score += texts.length * 50;
+        score += canvases.length * 500;
+        score += svgs.length * 400;
+
+        const hasVisibleContent =
+          element.offsetWidth > 0 &&
+          element.offsetHeight > 0 &&
+          (images.length > 0 ||
+            texts.length > 0 ||
+            canvases.length > 0 ||
+            svgs.length > 0);
+
+        if (!hasVisibleContent) score -= 3000;
+        return score;
+      }
+
+      let bestElement = null;
+      let bestScore = 0;
+      let bestSelector = null;
+
+      for (const selector of selectors) {
+        document.querySelectorAll(selector).forEach((el) => {
+          if (el.offsetWidth > 0 && el.offsetHeight > 0) {
+            const score = calculateDesignScore(el);
+            if (score > bestScore) {
+              bestScore = score;
+              bestElement = el;
+              bestSelector = selector;
+            }
+          }
+        });
+      }
+
+      if (!bestElement) {
+        return null;
+      }
+
+      const rect = bestElement.getBoundingClientRect();
+      return {
+        selector: bestSelector,
+        rect: {
+          x: Math.max(0, rect.x),
+          y: Math.max(0, rect.y),
+          width: Math.ceil(rect.width),
+          height: Math.ceil(rect.height),
+        },
+        score: bestScore,
+      };
+    }, preciseDesignSelectors);
+
+    if (
+      bestDesignContainer &&
+      bestDesignContainer.rect.width > 200 &&
+      bestDesignContainer.rect.height > 200
+    ) {
+      console.log(`✅ 找到最佳设计稿容器: ${bestDesignContainer.selector}`);
+      console.log(
+        `📐 容器尺寸: ${bestDesignContainer.rect.width}x${bestDesignContainer.rect.height}`
+      );
+
+      try {
+        const element = await page.$(bestDesignContainer.selector);
+        if (element) {
+          await page.evaluate((selector) => {
+            const el = document.querySelector(selector);
+            if (el) {
+              el.scrollIntoView({ behavior: "smooth", block: "center" });
+            }
+          }, bestDesignContainer.selector);
+
+          await page.waitForTimeout(1500);
+          const screenshot = await element.screenshot({
+            type: "png",
+            omitBackground: false,
+          });
+
+          const dataUrl = "data:image/png;base64," + screenshot.toString("base64");
+          console.log("✅ 成功截图设计稿主容器 (精确定位)");
+
+          await browser.close();
+          browser = null;
+          return buildChuangkitResult([], {
+            source: "puppeteer-screenshot",
+            quality: "preview",
+            imageUrl: dataUrl,
+            thumbnailUrl: bestDesignImageUrl || orderedImageUrls[0] || dataUrl,
+          });
+        }
+      } catch (screenshotError) {
+        console.warn("⚠️ 精确截图失败，尝试其他方案:", screenshotError.message);
+      }
+    }
+
+    if (orderedImageUrls.length > 0) {
+      console.log("✅ 使用网络拦截的设计稿 URL 作为回退");
+      await browser.close();
+      return buildChuangkitResult(orderedImageUrls, {
+        source: "puppeteer-url",
+        quality: "high",
+      });
+    }
+
+    console.log("📡 执行最后的 DOM 设计稿扫描...");
+    const fallbackImageUrls = await page.evaluate(() => {
+      const candidates = [];
+      const seen = new Set();
+      const imageSelectors = [
+        'img[src*="design"]',
+        'img[src*="work"]',
+        'img[src*="template"]',
+        'img[src*="preview"]',
+        'img[src*="main"]',
+        'img[src*="primary"]',
+        'img[src*="chuangkit"]',
+        'img[src*="cdn"]',
+        '.design-img img',
+        '.work-img img',
+        '.template-img img',
+        '.preview-img img',
+        '.main-img img',
+        '.canvas-img img',
+      ];
+
+      imageSelectors.forEach((selector) => {
+        document.querySelectorAll(selector).forEach((el) => {
+          const src =
+            el.src || el.getAttribute("data-src") || el.getAttribute("data-original");
+          if (!src || !src.startsWith("http") || seen.has(src)) {
+            return;
+          }
+
+          const rect = el.getBoundingClientRect();
+          if (rect.width > 200 && rect.height > 200) {
+            seen.add(src);
+            candidates.push({
+              url: src,
+              area: rect.width * rect.height,
+            });
+          }
+        });
+      });
+
+      candidates.sort((a, b) => b.area - a.area);
+      return candidates.map((candidate) => candidate.url);
+    });
+
+    await browser.close();
+
+    const mergedFallbackUrls = dedupeChuangkitUrls(fallbackImageUrls);
+    if (mergedFallbackUrls.length > 0) {
+      console.log(`✅ DOM 回退找到设计稿图片，共 ${mergedFallbackUrls.length} 张`);
+      return buildChuangkitResult(mergedFallbackUrls, {
+        source: "puppeteer-dom",
+        quality: "medium",
+      });
+    }
+
+    if (browser) {
+      await browser.close();
+      browser = null;
+    }
+
+    console.log("🔁 增强版未命中结果，回退到旧版创客贴抓取...");
+    const legacyResult = await scrapeChuangkit(pageUrl);
+    if (typeof legacyResult === "string" && legacyResult) {
+      if (legacyResult.startsWith("data:image")) {
+        return buildChuangkitResult([], {
+          source: "legacy-screenshot",
+          quality: "preview",
+          imageUrl: legacyResult,
+          thumbnailUrl: bestDesignImageUrl || legacyResult,
+        });
+      }
+
+      return buildChuangkitResult([legacyResult], {
+        source: "legacy-url",
+        quality: "high",
+      });
+    }
+
+    throw new Error("未找到创客贴设计稿主图");
+  } catch (err) {
+    console.error("❌ 创客贴精确抓取失败:", err.message);
+    throw err;
+  } finally {
+    if (browser) {
+      try {
+        await browser.close();
+      } catch (error) {
+        // Ignore browser close failures.
+      }
+    }
+  }
+}
+
+function extractChuangkitImageUrlsFromText(text) {
+  const urls = new Set();
+  if (!text) {
+    return [];
+  }
+
+  const patterns = [
+    /https?:\/\/[^"'\\\s>]+\.(?:png|jpe?g|webp)(?:\?[^"'\\\s>]*)?/gi,
+    /\/\/[^"'\\\s>]+\.(?:png|jpe?g|webp)(?:\?[^"'\\\s>]*)?/gi,
+  ];
+
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(text))) {
+      const rawUrl = pattern === patterns[1] ? `https:${match[0]}` : match[0];
+      const normalized = normalizeChuangkitImageUrl(rawUrl);
+      if (normalized) {
+        urls.add(normalized);
+      }
+    }
+  }
+
+  return Array.from(urls);
+}
+
+function scoreChuangkitDesignUrl(url, size = 0) {
+  const normalized = normalizeChuangkitImageUrl(url);
+  if (!normalized) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  if (isBlockedChuangkitAssetUrl(normalized)) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  const lower = normalized.toLowerCase();
+  let score = 0;
+
+  if (size > 200 * 1024) score += Math.min(size / 1024, 2000);
+  if (lower.includes("chuangkit.com")) score += 500;
+  if (lower.includes("cdn")) score += 200;
+  if (lower.includes("svg_build/render_result")) score += 1400;
+  if (/render_result|design|work|template|poster|banner/.test(lower)) score += 800;
+  if (/preview|main|primary|original|full/.test(lower)) score += 600;
+  if (/large|big|hd|high|origin/.test(lower)) score += 400;
+  if (/\d{3,4}x\d{3,4}/.test(lower)) score += 300;
+  if (/[?&#](?:page|index|sheet|frame|artboard)=\d{1,3}/.test(lower)) score += 180;
+  if (/[_/-](?:page|p|index|sheet|frame|artboard)[_-]?\d{1,3}(?:[_./?-]|$)/.test(lower)) {
+    score += 150;
+  }
+
+  if (/thumb|small|mini|icon|avatar|logo/.test(lower)) score -= 1200;
+  if (/watermark|mark|overlay|mask/.test(lower)) score -= 900;
+  if (/ui|button|nav|menu|header|footer/.test(lower)) score -= 800;
+  if (/analytics|tracking|tracker|pixel|hm\.gif/.test(lower)) score -= 4000;
+  if (/\.svg(?:$|\?)/.test(lower) && !/svg_build\/render_result/.test(lower)) {
+    score -= 3000;
+  }
+
+  if (/\.jpe?g(?:$|\?)/.test(lower)) score += 100;
+  if (/\.png(?:$|\?)/.test(lower)) score += 80;
+  if (/\.webp(?:$|\?)/.test(lower)) score += 60;
+
+  return score;
+}
+
+function extractChuangkitPageHint(url) {
+  const normalized = normalizeChuangkitImageUrl(url);
+  if (!normalized) {
+    return null;
+  }
+
+  const patterns = [
+    /[?&#](?:page|index|sheet|frame|artboard)=(\d{1,3})/i,
+    /[_/-](?:page|p|index|sheet|frame|artboard)[_-]?(\d{1,3})(?:[_./?-]|$)/i,
+    /[_/-](\d{1,3})(?=\.(?:png|jpe?g|webp)(?:\?|$))/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+    if (!match) {
+      continue;
+    }
+
+    const value = Number(match[1]);
+    if (Number.isFinite(value) && value > 0) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function dedupeChuangkitUrls(urls) {
+  const seen = new Set();
+  const result = [];
+
+  for (const url of urls || []) {
+    const normalized = normalizeChuangkitImageUrl(url);
+    if (!normalized || isBlockedChuangkitAssetUrl(normalized) || seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    result.push(normalized);
+  }
+
+  return result;
+}
+
+function buildChuangkitPages(imageUrls) {
+  return (imageUrls || []).map((imageUrl, index) => ({
+    page: index + 1,
+    imageUrl,
+  }));
+}
+
+function buildChuangkitResult(imageUrls, extras = {}) {
+  const uniqueUrls = dedupeChuangkitUrls(imageUrls);
+  const pages = buildChuangkitPages(uniqueUrls);
+
+  return {
+    success: extras.success !== false,
+    platform: "Chuangkit",
+    ...extras,
+    imageUrl: uniqueUrls[0] || extras.imageUrl || null,
+    thumbnailUrl: extras.thumbnailUrl || uniqueUrls[0] || extras.imageUrl || null,
+    imageUrls: uniqueUrls,
+    images: uniqueUrls,
+    pages,
+    pageCount: uniqueUrls.length,
+    isMultiPage: uniqueUrls.length > 1,
+  };
+}
+
+function buildOrderedChuangkitUrls(capturedImages, domCandidates = []) {
+  const ordered = [];
+  const seen = new Set();
+
+  const push = (rawUrl) => {
+    const normalized = normalizeChuangkitImageUrl(rawUrl);
+    if (!normalized || isBlockedChuangkitAssetUrl(normalized) || seen.has(normalized)) {
+      return;
+    }
+
+    seen.add(normalized);
+    ordered.push(normalized);
+  };
+
+  (domCandidates || [])
+    .slice()
+    .sort((a, b) => {
+      const aPage = Number.isFinite(a.pageHint) ? a.pageHint : Number.MAX_SAFE_INTEGER;
+      const bPage = Number.isFinite(b.pageHint) ? b.pageHint : Number.MAX_SAFE_INTEGER;
+      if (aPage !== bPage) {
+        return aPage - bPage;
+      }
+
+      const aIndex = Number.isFinite(a.domIndex) ? a.domIndex : Number.MAX_SAFE_INTEGER;
+      const bIndex = Number.isFinite(b.domIndex) ? b.domIndex : Number.MAX_SAFE_INTEGER;
+      return aIndex - bIndex;
+    })
+    .forEach((candidate) => {
+      const normalized = normalizeChuangkitImageUrl(candidate && candidate.url);
+      if (!normalized) {
+        return;
+      }
+
+      const captured = capturedImages.get(normalized);
+      if (!captured && scoreChuangkitDesignUrl(normalized) < 1000) {
+        return;
+      }
+
+      push(normalized);
+    });
+
+  Array.from(capturedImages.values())
+    .filter((item) => item.score >= 900)
+    .sort((a, b) => {
+      const aPage = Number.isFinite(a.pageHint) ? a.pageHint : Number.MAX_SAFE_INTEGER;
+      const bPage = Number.isFinite(b.pageHint) ? b.pageHint : Number.MAX_SAFE_INTEGER;
+      if (aPage !== bPage) {
+        return aPage - bPage;
+      }
+
+      const aIndex = Number.isFinite(a.domIndex) ? a.domIndex : Number.MAX_SAFE_INTEGER;
+      const bIndex = Number.isFinite(b.domIndex) ? b.domIndex : Number.MAX_SAFE_INTEGER;
+      if (aIndex !== bIndex) {
+        return aIndex - bIndex;
+      }
+
+      if (a.score !== b.score) {
+        return b.score - a.score;
+      }
+
+      if (a.order !== b.order) {
+        return a.order - b.order;
+      }
+
+      return 0;
+    })
+    .forEach((item) => push(item.url));
+
+  return ordered;
+}
+
+async function collectChuangkitDomCandidates(page) {
+  return page.evaluate(() => {
+    const results = [];
+    const seen = new Set();
+
+    const normalizeUrl = (value) => {
+      if (typeof value !== "string") {
+        return null;
+      }
+
+      const normalized = value.trim().replace(/\\/g, "/");
+      if (!normalized) {
+        return null;
+      }
+
+      if (normalized.startsWith("//")) {
+        return `https:${normalized}`;
+      }
+
+      return normalized;
+    };
+
+    const scoreUrl = (value) => {
+      const lower = String(value || "").toLowerCase();
+      let score = 0;
+      if (lower.includes("svg_build/render_result")) score += 10;
+      if (/render_result|design|work|template|preview|poster|banner/.test(lower)) score += 6;
+      if (/thumb|small|mini|icon|avatar|logo|watermark|mask/.test(lower)) score -= 12;
+      return score;
+    };
+
+    const findPageHint = (element) => {
+      let current = element;
+      while (current && current !== document.body) {
+        const attrs = [
+          "data-page",
+          "data-index",
+          "data-page-index",
+          "data-page-number",
+          "data-slide-index",
+        ];
+
+        for (const attr of attrs) {
+          const raw = current.getAttribute && current.getAttribute(attr);
+          if (/^\d+$/.test(String(raw || ""))) {
+            return Number(raw);
+          }
+        }
+
+        const text = (current.textContent || "").trim();
+        const match = text.match(/(?:第\s*)?(\d{1,3})(?:\s*页)?/);
+        if (match) {
+          return Number(match[1]);
+        }
+
+        current = current.parentElement;
+      }
+
+      return null;
+    };
+
+    const add = (rawUrl, element, domIndex, selector) => {
+      const rect = element.getBoundingClientRect();
+      if (rect.width < 24 || rect.height < 24) {
+        return;
+      }
+
+      const normalized = normalizeUrl(rawUrl);
+      if (
+        !normalized ||
+        !/^https?:\/\//i.test(normalized) ||
+        seen.has(normalized) ||
+        scoreUrl(normalized) < 3
+      ) {
+        return;
+      }
+
+      seen.add(normalized);
+      results.push({
+        url: normalized,
+        selector,
+        domIndex,
+        pageHint: findPageHint(element),
+      });
+    };
+
+    const selectors = [
+      '[class*="thumb"] img',
+      '[class*="thumbnail"] img',
+      '[class*="page"] img',
+      '[class*="preview"] img',
+      '[class*="slide"] img',
+      '[data-page] img',
+      '[data-index] img',
+      'img[src*="render_result"]',
+      'img[data-src*="render_result"]',
+      '[style*="render_result"]',
+      '[style*="background-image"]',
+    ];
+
+    selectors.forEach((selector) => {
+      document.querySelectorAll(selector).forEach((element, index) => {
+        const urls = [
+          element.getAttribute && element.getAttribute("src"),
+          element.getAttribute && element.getAttribute("data-src"),
+          element.getAttribute && element.getAttribute("data-original"),
+          element.getAttribute && element.getAttribute("data-preview"),
+          element.getAttribute && element.getAttribute("data-image"),
+          element.src,
+        ];
+
+        const styleValue =
+          (element.getAttribute && element.getAttribute("style")) ||
+          window.getComputedStyle(element).backgroundImage ||
+          "";
+        const styleMatch = styleValue.match(/url\(["']?([^"')]+)["']?\)/i);
+        if (styleMatch && styleMatch[1]) {
+          urls.push(styleMatch[1]);
+        }
+
+        urls.forEach((value) => add(value, element, index, selector));
+      });
+    });
+
+    return results;
+  });
+}
+
+async function traverseChuangkitGallery(page) {
+  return page.evaluate(async () => {
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const seen = new Set();
+    const candidates = [];
+
+    const isVisible = (element) => {
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return (
+        rect.width > 24 &&
+        rect.height > 24 &&
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        style.opacity !== "0"
+      );
+    };
+
+    const shouldKeep = (element) => {
+      if (!isVisible(element)) {
+        return false;
+      }
+
+      const rect = element.getBoundingClientRect();
+      if (rect.width > 480 || rect.height > 480) {
+        return false;
+      }
+
+      const text = `${element.className || ""} ${element.id || ""} ${element.textContent || ""}`.toLowerCase();
+      return (
+        /thumb|thumbnail|page|preview|slide|list|item|页/.test(text) ||
+        Boolean(element.querySelector("img"))
+      );
+    };
+
+    const selectors = [
+      '[class*="thumb"]',
+      '[class*="thumbnail"]',
+      '[class*="page-item"]',
+      '[class*="page"] [role="button"]',
+      '[class*="slide"]',
+      '[data-page]',
+      '[data-index]',
+    ];
+
+    selectors.forEach((selector) => {
+      document.querySelectorAll(selector).forEach((element) => {
+        if (!shouldKeep(element)) {
+          return;
+        }
+
+        const rect = element.getBoundingClientRect();
+        const key = [
+          selector,
+          element.getAttribute("data-page") || "",
+          element.getAttribute("data-index") || "",
+          element.getAttribute("aria-label") || "",
+          (element.textContent || "").trim().slice(0, 20),
+          Math.round(rect.top),
+          Math.round(rect.left),
+        ].join("|");
+
+        if (seen.has(key)) {
+          return;
+        }
+
+        seen.add(key);
+        candidates.push(element);
+      });
+    });
+
+    if (candidates.length <= 1) {
+      return 0;
+    }
+
+    let clicked = 0;
+    for (const element of candidates.slice(0, 12)) {
+      try {
+        element.scrollIntoView({ block: "center", inline: "center" });
+        await wait(250);
+        element.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+        element.dispatchEvent(
+          new MouseEvent("mousedown", {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+          })
+        );
+        element.dispatchEvent(
+          new MouseEvent("mouseup", {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+          })
+        );
+        element.click();
+        clicked += 1;
+        await wait(900);
+      } catch (error) {
+        // Ignore single thumbnail click failures.
+      }
+    }
+
+    return clicked;
+  });
+}
 
 /**
  * 创客贴页面抓取优化 - 专门针对设计稿主图精确提取

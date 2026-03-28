@@ -18,7 +18,8 @@
       <!-- 图片预览对话框 -->
       <el-dialog v-model="previewDialogVisible" title="查看结果" width="550px" :close-on-click-modal="true">
         <div class="preview-container">
-          <el-image :src="previewImageUrl" fit="contain" :preview-src-list="[previewImageUrl]" :initial-index="0"
+          <el-image :src="previewImageUrl" fit="contain"
+            :preview-src-list="previewImageUrls.length ? previewImageUrls : [previewImageUrl]" :initial-index="0"
             class="preview-image">
             <template #error>
               <div class="image-error">
@@ -99,7 +100,8 @@
           </div>
 
           <!-- 本地上传去水印对话框 -->
-          <el-dialog v-model="uploadDialogVisible" title="本地图片去水印" width="520px" :close-on-click-modal="false">
+          <el-dialog v-model="uploadDialogVisible" title="本地图片去水印" width="520px" :close-on-click-modal="false"
+            @closed="resetUploadState">
             <div class="upload-dialog-body">
               <el-upload class="upload-block" drag :auto-upload="false" :show-file-list="false" accept="image/*"
                 @change="handleFileChange">
@@ -116,12 +118,20 @@
               <div v-if="uploadPreview" class="local-preview">
                 <img :src="uploadPreview" alt="preview" />
               </div>
+              <div v-if="uploadFile" class="upload-file-meta">
+                {{ uploadFile.name }} · {{ formatFileSize(uploadFile.size) }}
+              </div>
 
               <!-- 算法选择 -->
               <div v-if="uploadFile" class="algorithm-selector">
                 <div class="selector-label">选择去水印算法:</div>
                 <el-radio-group v-model="selectedAlgorithm" size="small">
-                  <el-radio-button value="default">
+                  <el-radio-button value="auto">
+                    <el-tooltip content="智能判断图片复杂度，自动选择最佳算法，并在必要时回退其它模式" placement="top">
+                      <span>🤖 智能自动</span>
+                    </el-tooltip>
+                  </el-radio-button>
+                  <el-radio-button value="hybrid">
                     <el-tooltip content="终极Hybrid方案：智能区域检测+方向性去除+多尺度处理+纹理修复，90%接近PS效果" placement="top">
                       <span>🌟 Hybrid（推荐）</span>
                     </el-tooltip>
@@ -137,7 +147,11 @@
                     </el-tooltip>
                   </el-radio-button>
                 </el-radio-group>
+                <div class="selector-tip">
+                  智能自动会根据图片复杂度自动选择算法，并在结果异常时尝试其它模式。
+                </div>
               </div>
+              <div v-if="uploadStatus" class="upload-status">{{ uploadStatus }}</div>
 
               <div class="upload-actions">
                 <el-button @click="uploadDialogVisible = false">取消</el-button>
@@ -224,7 +238,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, reactive } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, reactive, watch } from 'vue'
 import { useStore } from 'vuex'
 import { Grid, Refresh, Connection, Search, QuestionFilled, Picture, Download, Delete } from '@element-plus/icons-vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
@@ -260,10 +274,115 @@ const downloadRecord = ref(null)
 // 图片预览对话框状态
 const previewDialogVisible = ref(false)
 const previewImageUrl = ref('')
+const previewImageUrls = ref([])
 const previewTextLayers = ref([])
 
 // 批量选择状态
 const selectedRecords = ref(new Set())
+
+function detectPlatformFromUrl(url = '') {
+  const lowerUrl = url.toLowerCase()
+
+  if (lowerUrl.includes('douyin')) return '抖音'
+  if (lowerUrl.includes('kuaishou')) return '快手'
+  if (lowerUrl.includes('xiaohongshu') || lowerUrl.includes('xhs')) return '小红书'
+  if (lowerUrl.includes('bilibili')) return 'Bilibili'
+  if (lowerUrl.includes('youtube')) return 'YouTube'
+  if (lowerUrl.includes('818ps') || lowerUrl.includes('tuguaishou')) return '818ps'
+  if (lowerUrl.includes('canva')) return 'Canva'
+
+  return 'Unknown'
+}
+
+function isBlockedPreviewAssetUrl(value) {
+  if (typeof value !== 'string') return true
+
+  const normalized = value.trim().toLowerCase()
+  if (!normalized) return true
+  if (/^data:image\//.test(normalized) || /^blob:/.test(normalized)) return false
+  if (/^https?:\/\/hm\.baidu\.com\/hm\.gif/.test(normalized)) return true
+  if (/googletagmanager|google-analytics|doubleclick|umeng|clarity/.test(normalized)) return true
+  if (/\/distheadless\/img\//.test(normalized)) return true
+  if (/full-screen|fullscreen|favicon|tracker|tracking|pixel/.test(normalized)) return true
+
+  return false
+}
+
+function getRecordImageUrls(record) {
+  if (!record) return []
+  const urls = []
+  const seen = new Set()
+
+  const addUrl = (value) => {
+    if (typeof value !== 'string') return
+    const normalized = value.trim()
+    if (!normalized || isBlockedPreviewAssetUrl(normalized) || seen.has(normalized)) return
+    seen.add(normalized)
+    urls.push(normalized)
+  }
+
+  ;(record.imageUrls || []).forEach(addUrl)
+  ;(record.pages || []).forEach((page) => addUrl(page?.imageUrl))
+  addUrl(record.imageUrl)
+  addUrl(record.thumbnailUrl)
+
+  return urls
+}
+
+function normalizePages(pages, fallbackUrls = []) {
+  const normalizedPages = []
+  const seen = new Set()
+
+  const addPage = (imageUrl, pageNumber) => {
+    if (typeof imageUrl !== 'string') return
+    const normalizedUrl = imageUrl.trim()
+    if (!normalizedUrl || isBlockedPreviewAssetUrl(normalizedUrl) || seen.has(normalizedUrl)) return
+
+    seen.add(normalizedUrl)
+    normalizedPages.push({
+      page: Number(pageNumber) || normalizedPages.length + 1,
+      imageUrl: normalizedUrl
+    })
+  }
+
+  ;(pages || []).forEach((page, index) => {
+    addPage(page?.imageUrl, page?.page || index + 1)
+  })
+
+  if (!normalizedPages.length) {
+    ;(fallbackUrls || []).forEach((imageUrl, index) => {
+      addPage(imageUrl, index + 1)
+    })
+  }
+
+  return normalizedPages
+}
+
+async function downloadRecordImages(record, format = 'jpg') {
+  const urls = getRecordImageUrls(record)
+  if (!urls.length) return
+
+  const ext = format || 'jpg'
+  for (let index = 0; index < urls.length; index += 1) {
+    const url = urls[index]
+    const link = document.createElement('a')
+    link.href = url
+    link.download = urls.length > 1
+      ? `download-${record.id}-p${index + 1}.${ext}`
+      : `download-${record.id}.${ext}`
+    link.target = '_blank'
+    link.rel = 'noopener noreferrer'
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+
+    if (!url.startsWith('data:') && !/blob:/.test(url)) {
+      window.open(url, '_blank', 'noopener')
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 300))
+  }
+}
 
 function toggleSelection(recordId, selected) {
   if (selected) {
@@ -285,7 +404,8 @@ function openDownload(record) {
 
 function viewResult(record) {
   console.log('查看结果', record)
-  previewImageUrl.value = record.thumbnailUrl || record.imageUrl || ''
+  previewImageUrls.value = getRecordImageUrls(record)
+  previewImageUrl.value = previewImageUrls.value[0] || record.thumbnailUrl || record.imageUrl || ''
   previewTextLayers.value = record.textLayers || []
   previewDialogVisible.value = true
 }
@@ -300,15 +420,8 @@ async function batchDownload() {
 
   for (const id of selected) {
     const record = history.value.find(r => r.id === id)
-    if (record && record.thumbnailUrl) {
-      const link = document.createElement('a')
-      link.href = record.thumbnailUrl
-      link.download = `image-${record.id}.jpg`
-      link.target = '_blank'
-      document.body.appendChild(link)
-      link.click()
-      document.body.removeChild(link)
-      await new Promise(resolve => setTimeout(resolve, 500))
+    if (record) {
+      await downloadRecordImages(record, 'jpg')
     }
   }
   clearSelection()
@@ -356,9 +469,10 @@ async function batchDelete() {
   batchDeleting.value = false
 }
 
-async function handleDownloadEvent({ record, format, print }) {
+async function legacyHandleDownloadEvent({ record, format, print }) {
   const url = record.thumbnailUrl
   try {
+    return await downloadRecordImages(record, format || 'png')
     const a = document.createElement('a')
     a.href = url
     const ext = format || 'png'
@@ -376,6 +490,14 @@ async function handleDownloadEvent({ record, format, print }) {
       // 尝试再打开一次新标签作为兜底（避免某些浏览器阻止）
       window.open(url, '_blank', 'noopener')
     }
+  } catch (err) {
+    console.error('下载失败', err)
+  }
+}
+
+async function handleDownloadEvent({ record, format }) {
+  try {
+    await downloadRecordImages(record, format || 'png')
   } catch (err) {
     console.error('下载失败', err)
   }
@@ -419,6 +541,8 @@ const handleParse = async () => {
     else if (url.includes('youtube')) platform = 'YouTube'
     else if (url.includes('818ps')) platform = '818ps'
     else if (url.includes('canva')) platform = 'Canva'
+
+    platform = detectPlatformFromUrl(originalUrl)
 
     console.log('🚀 开始解析:', { url: originalUrl, platform })
 
@@ -473,6 +597,11 @@ const handleParse = async () => {
     console.log('🔄 调用后端API验证图片URL...')
     let useRealImage = false
     let warningMessage = null
+    let extractedImageUrl = thumbnailUrl
+    let extractedImageUrls = []
+    let extractedPages = []
+    let extractedPageCount = 0
+    let extractedIsMultiPage = false
 
     try {
       const response = await fetch('/api/extract-image', {
@@ -484,7 +613,24 @@ const handleParse = async () => {
       const data = await response.json()
 
       if (response.ok && data.success && data.imageUrl) {
-        thumbnailUrl = data.imageUrl
+        platform = data.platform || platform
+        thumbnailUrl = data.thumbnailUrl || data.imageUrl || thumbnailUrl
+        extractedImageUrl = data.imageUrl || thumbnailUrl
+        extractedImageUrls = Array.isArray(data.imageUrls)
+          ? data.imageUrls
+          : Array.isArray(data.images)
+            ? data.images
+            : []
+        extractedPages = Array.isArray(data.pages) ? data.pages : []
+        extractedPageCount =
+          Number(data.pageCount) ||
+          extractedPages.length ||
+          extractedImageUrls.length ||
+          (extractedImageUrl ? 1 : 0)
+        extractedIsMultiPage =
+          Boolean(data.isMultiPage) ||
+          extractedPageCount > 1 ||
+          extractedImageUrls.length > 1
         useRealImage = true
         console.log('✅ 后端验证成功，使用真实图片:', thumbnailUrl)
       } else {
@@ -527,10 +673,28 @@ const handleParse = async () => {
 
     console.log('🎯 最终使用的图片URL:', thumbnailUrl)
 
+    const normalizedImageUrls = getRecordImageUrls({
+      imageUrls: extractedImageUrls,
+      pages: extractedPages,
+      imageUrl: extractedImageUrl || thumbnailUrl,
+      thumbnailUrl
+    })
+    const normalizedPages = normalizePages(extractedPages, normalizedImageUrls)
+    const normalizedPageCount =
+      extractedPageCount || normalizedPages.length || normalizedImageUrls.length
+    const normalizedIsMultiPage =
+      extractedIsMultiPage || normalizedPageCount > 1 || normalizedImageUrls.length > 1
+    const finalThumbnailUrl = normalizedImageUrls[0] || thumbnailUrl
+
     await store.dispatch('parseUrl', {
       url: originalUrl,
       platform,
-      thumbnailUrl
+      thumbnailUrl: finalThumbnailUrl,
+      imageUrl: extractedImageUrl || finalThumbnailUrl,
+      imageUrls: normalizedImageUrls,
+      pages: normalizedPages,
+      pageCount: normalizedPageCount,
+      isMultiPage: normalizedIsMultiPage
     })
 
     inputUrl.value = ''
@@ -589,73 +753,146 @@ const uploadDialogVisible = ref(false)
 const uploadFile = ref(null)
 const uploadPreview = ref('')
 const uploading = ref(false)
-const selectedAlgorithm = ref('default')
+const selectedAlgorithm = ref('auto')
+const uploadStatus = ref('')
+
+const LOCAL_UPLOAD_MAX_SIZE = 10 * 1024 * 1024
+const LOCAL_UPLOAD_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/webp'])
+const LOCAL_WATERMARK_METHOD_LABELS = {
+  auto: '智能自动',
+  hybrid: 'Hybrid方案',
+  advanced: '高级模式',
+  fast: '快速模式',
+  original: '原图'
+}
+
+function getUploadMethodLabel(method = selectedAlgorithm.value) {
+  return LOCAL_WATERMARK_METHOD_LABELS[method] || '本地去水印'
+}
+
+function syncUploadReadyStatus() {
+  if (!uploadFile.value || uploading.value) return
+  uploadStatus.value = `已选择文件：${uploadFile.value.name}，将使用 ${getUploadMethodLabel()} 处理`
+}
+
+function revokeUploadPreview() {
+  if (uploadPreview.value && uploadPreview.value.startsWith('blob:')) {
+    URL.revokeObjectURL(uploadPreview.value)
+  }
+}
+
+function resetUploadState() {
+  revokeUploadPreview()
+  uploadFile.value = null
+  uploadPreview.value = ''
+  uploadStatus.value = ''
+  uploading.value = false
+  selectedAlgorithm.value = 'auto'
+}
+
+function formatFileSize(size = 0) {
+  if (!Number.isFinite(size) || size <= 0) return '0 B'
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${(size / (1024 * 1024)).toFixed(2)} MB`
+}
 
 function openUploadDialog() {
+  resetUploadState()
   uploadDialogVisible.value = true
-  selectedAlgorithm.value = 'default' // 重置为默认算法
 }
 
 function handleFileChange(file) {
   // el-upload 触发 change 时传入 { file, files }，也可能直接传 file 对象
   const raw = file.raw || file
   if (!raw) return
+
+  if (!LOCAL_UPLOAD_IMAGE_TYPES.has(String(raw.type || '').toLowerCase())) {
+    ElMessage.warning('仅支持 PNG/JPG/WebP 图片')
+    return
+  }
+
+  if (raw.size > LOCAL_UPLOAD_MAX_SIZE) {
+    ElMessage.warning('图片大小不能超过 10MB')
+    return
+  }
+
+  revokeUploadPreview()
   uploadFile.value = raw
+  syncUploadReadyStatus()
   try { uploadPreview.value = URL.createObjectURL(raw) } catch { }
 }
 
 async function submitUpload() {
   if (!uploadFile.value) return
   uploading.value = true
+  uploadStatus.value = `正在使用 ${getUploadMethodLabel()} 处理图片...`
   try {
     const fd = new FormData()
     fd.append('image', uploadFile.value)
 
     // 根据选择的算法添加 query 参数
-    const queryParam = selectedAlgorithm.value !== 'default' ? `?method=${selectedAlgorithm.value}` : ''
+    const queryParam = `?method=${encodeURIComponent(selectedAlgorithm.value)}`
     const resp = await fetch(`/api/upload-image${queryParam}`, { method: 'POST', body: fd })
     const data = await resp.json()
 
     if (resp.ok && data.success && data.imageUrl) {
-      // 显示处理结果提示
-      const methodName = {
-        'combined': 'Hybrid方案',
-        'fast': '快速模式',
-        'advanced': '高级模式',
-        'original': '原图（处理失败）'
-      }[data.method] || '默认模式'
+      const methodName = data.methodLabel || LOCAL_WATERMARK_METHOD_LABELS[data.method] || '本地去水印'
+      const message = data.message || `已使用 ${methodName} 完成处理`
+
+      if (Array.isArray(data.attemptedMethods) && data.attemptedMethods.length) {
+        console.table(data.attemptedMethods)
+      }
 
       store.commit('ADD_RECORD', {
         id: Date.now(),
         originalUrl: '本地上传:' + (uploadFile.value.name || 'image') + ` [${methodName}]`,
         platform: '本地',
+        imageUrl: data.imageUrl,
+        imageUrls: [data.imageUrl],
+        pages: [{ page: 1, imageUrl: data.imageUrl }],
+        pageCount: 1,
+        isMultiPage: false,
         thumbnailUrl: data.imageUrl,
+        localWatermarkMethod: data.method,
+        localWatermarkMethodLabel: methodName,
+        requestedMethod: data.requestedMethod,
+        requestedMethodLabel: data.requestedMethodLabel,
+        fallbackUsed: Boolean(data.fallbackUsed),
+        qualityScore: Number.isFinite(data.qualityScore) ? data.qualityScore : null,
+        selectionReason: data.selectionReason || '',
+        attemptedMethods: Array.isArray(data.attemptedMethods) ? data.attemptedMethods : [],
         status: 'success',
         timestamp: new Date().toISOString()
       })
 
       uploadDialogVisible.value = false
-      uploadFile.value = null
-      uploadPreview.value = ''
+      resetUploadState()
 
-      // 显示成功提示
       if (data.method !== 'original') {
-        store.commit('SET_ERROR', `✅ 使用 ${methodName} 处理完成`)
+        ElMessage.success(message)
       } else {
-        store.commit('SET_ERROR', '⚠️ 水印去除失败，已保存原图')
+        ElMessage.warning(message)
       }
-      setTimeout(() => store.commit('SET_ERROR', null), 3000)
     } else {
-      store.commit('SET_ERROR', data.message || '上传失败')
-      setTimeout(() => store.commit('SET_ERROR', null), 3000)
+      uploadStatus.value = data.message || '上传失败'
+      ElMessage.error(data.message || '上传失败')
     }
   } catch (e) {
-    store.commit('SET_ERROR', e.message || '上传异常')
-    setTimeout(() => store.commit('SET_ERROR', null), 3000)
+    uploadStatus.value = e.message || '上传异常'
+    ElMessage.error(e.message || '上传异常')
   } finally {
     uploading.value = false
   }
 }
+
+watch(selectedAlgorithm, () => {
+  syncUploadReadyStatus()
+})
+
+onBeforeUnmount(() => {
+  revokeUploadPreview()
+})
 </script>
 
 <style scoped>
@@ -999,6 +1236,15 @@ async function submitUpload() {
   object-fit: contain;
 }
 
+.upload-file-meta {
+  font-size: 13px;
+  color: #64748b;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+
 .algorithm-selector {
   padding: 12px;
   background: #f8fafc;
@@ -1011,6 +1257,23 @@ async function submitUpload() {
   color: #475569;
   margin-bottom: 8px;
   font-weight: 500;
+}
+
+.selector-tip {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #64748b;
+}
+
+.upload-status {
+  font-size: 13px;
+  line-height: 1.6;
+  color: #2563eb;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  padding: 10px 12px;
 }
 
 .upload-actions {

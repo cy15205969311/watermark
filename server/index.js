@@ -65,7 +65,70 @@ const {
   removeWatermark,
   removeWatermarkAdvanced,
   removeWatermarkFast,
+  removeWatermarkAuto,
 } = require("./watermarkRemoval");
+
+const LOCAL_UPLOAD_IMAGE_MIME_TYPES = new Set([
+  "image/jpeg",
+  "image/jpg",
+  "image/png",
+  "image/webp",
+]);
+
+function normalizeLocalWatermarkMethod(method) {
+  const normalized = String(method || "auto").toLowerCase();
+
+  if (normalized === "default") {
+    return "hybrid";
+  }
+
+  if (["auto", "hybrid", "advanced", "fast"].includes(normalized)) {
+    return normalized;
+  }
+
+  return "auto";
+}
+
+function getLocalWatermarkMethodLabel(method) {
+  switch (normalizeLocalWatermarkMethod(method)) {
+    case "hybrid":
+      return "Hybrid方案";
+    case "advanced":
+      return "高级模式";
+    case "fast":
+      return "快速模式";
+    case "auto":
+      return "智能自动";
+    default:
+      return "原图";
+  }
+}
+
+async function safeDeleteUploadedFile(filePath) {
+  if (!filePath) {
+    return;
+  }
+
+  try {
+    await fs.promises.unlink(filePath);
+  } catch {
+    // Ignore cleanup failures.
+  }
+}
+
+async function runLocalWatermarkRemoval(method, inputPath, outputPath) {
+  switch (normalizeLocalWatermarkMethod(method)) {
+    case "fast":
+      return removeWatermarkFast(inputPath, outputPath);
+    case "advanced":
+      return removeWatermarkAdvanced(inputPath, outputPath);
+    case "hybrid":
+      return removeWatermark(inputPath, outputPath);
+    case "auto":
+    default:
+      return removeWatermarkAuto(inputPath, outputPath);
+  }
+}
 
 // 上传并智能去水印
 app.post("/api/upload-image", upload.single("image"), async (req, res) => {
@@ -81,6 +144,15 @@ app.post("/api/upload-image", upload.single("image"), async (req, res) => {
     const uploadedFile = req.file.path;
     console.log(`[${requestId}] 📁 原始文件: ${req.file.filename}`);
 
+    if (!LOCAL_UPLOAD_IMAGE_MIME_TYPES.has(String(req.file.mimetype || "").toLowerCase())) {
+      console.error(`[${requestId}] ❌ 不支持的图片格式: ${req.file.mimetype}`);
+      await safeDeleteUploadedFile(uploadedFile);
+      return res.status(400).json({
+        success: false,
+        message: "仅支持 PNG/JPG/WebP 图片",
+      });
+    }
+
     // 生成处理后文件名（添加 -processed 后缀）
     const ext = path.extname(req.file.filename);
     const basename = path.basename(req.file.filename, ext);
@@ -89,23 +161,35 @@ app.post("/api/upload-image", upload.single("image"), async (req, res) => {
 
     console.log(`[${requestId}] 🎨 开始水印去除处理...`);
 
-    // 选择处理策略（可通过 query 参数切换：?method=fast|advanced）
-    const method = req.query.method || "default";
+    // 选择处理策略（可通过 query 参数切换：?method=auto|hybrid|advanced|fast）
+    const requestedMethod = normalizeLocalWatermarkMethod(req.query.method);
     let result;
 
     try {
-      switch (method) {
-        case "fast":
-          result = await removeWatermarkFast(uploadedFile, processedPath);
-          break;
-        case "advanced":
-          result = await removeWatermarkAdvanced(uploadedFile, processedPath);
-          break;
-        default:
-          result = await removeWatermark(uploadedFile, processedPath);
+      result = await runLocalWatermarkRemoval(
+        requestedMethod,
+        uploadedFile,
+        processedPath
+      );
+
+      if (
+        requestedMethod !== "auto" &&
+        (!result || result.success === false || result.method === "original")
+      ) {
+        console.warn(
+          `[${requestId}] ⚠️ 指定模式 ${requestedMethod} 处理效果不可用，自动回退到智能模式`
+        );
+        result = await removeWatermarkAuto(uploadedFile, processedPath);
+        result = {
+          ...result,
+          fallbackUsed: true,
+          requestedMethod,
+        };
       }
 
-      console.log(`[${requestId}] ✅ 水印去除完成，方法: ${result.method}`);
+      console.log(
+        `[${requestId}] ✅ 水印去除完成，请求模式: ${requestedMethod}，实际方法: ${result.method}`
+      );
 
       // 返回处理后的图片 URL
       const processedUrl = `${req.protocol}://${req.get(
@@ -115,12 +199,45 @@ app.post("/api/upload-image", upload.single("image"), async (req, res) => {
         req.file.filename
       }`;
 
+      const actualMethod = result && result.method ? result.method : "original";
+      const requestedLabel = getLocalWatermarkMethodLabel(requestedMethod);
+      const actualLabel =
+        result && result.label
+          ? result.label
+          : actualMethod === "original"
+            ? "原图"
+            : getLocalWatermarkMethodLabel(actualMethod);
+      const responseMessage =
+        actualMethod === "original"
+          ? result && result.message
+            ? result.message
+            : "去水印失败，已返回原图"
+          : result && result.fallbackUsed
+            ? `已从 ${requestedLabel} 自动回退到 ${actualLabel}`
+            : `已使用 ${actualLabel} 完成去水印`;
+
       res.json({
         success: true,
-        imageUrl: processedUrl,
+        imageUrl: actualMethod === "original" ? originalUrl : processedUrl,
         originalUrl: originalUrl,
-        method: result.method,
-        message: "水印去除成功",
+        requestedMethod,
+        requestedMethodLabel: requestedLabel,
+        method: actualMethod,
+        methodLabel: actualLabel,
+        fallbackUsed: Boolean(result && result.fallbackUsed),
+        attemptedMethods:
+          result && Array.isArray(result.attemptedMethods)
+            ? result.attemptedMethods
+            : [],
+        detection: result && result.detection ? result.detection : null,
+        qualityScore:
+          result && Number.isFinite(result.qualityScore)
+            ? result.qualityScore
+            : null,
+        selectionReason:
+          result && result.selectionReason ? result.selectionReason : null,
+        outputFormat: result && result.outputFormat ? result.outputFormat : null,
+        message: responseMessage,
       });
     } catch (processError) {
       console.error(
@@ -135,7 +252,10 @@ app.post("/api/upload-image", upload.single("image"), async (req, res) => {
       res.json({
         success: true,
         imageUrl: originalUrl,
+        originalUrl,
+        requestedMethod,
         method: "original",
+        methodLabel: "原图",
         message: "水印去除失败，返回原图",
       });
     }
@@ -179,6 +299,10 @@ pool
   });
 
 // 【新增】初始化浏览器池（支持 Puppeteer 隐身抓取）
+ensureParseRecordColumns().catch((err) => {
+  console.warn("⚠️ parse_records 多页字段检查失败:", err.message);
+});
+
 initDefaultPool()
   .then(() => {
     console.log("✅ 浏览器池初始化成功，已预热 Puppeteer 实例");
@@ -193,6 +317,141 @@ initDefaultPool()
 // API 路由
 
 // 1. 获取历史记录
+function resolvePlatform(url, platform) {
+  const normalizedPlatform =
+    typeof platform === "string" ? platform.trim() : "";
+
+  if (normalizedPlatform && normalizedPlatform !== "Unknown") {
+    return normalizedPlatform;
+  }
+
+  const lowerUrl = String(url || "").toLowerCase();
+
+  if (lowerUrl.includes("douyin")) return "抖音";
+  if (lowerUrl.includes("kuaishou")) return "快手";
+  if (lowerUrl.includes("xiaohongshu") || lowerUrl.includes("xhs")) {
+    return "小红书";
+  }
+  if (lowerUrl.includes("bilibili")) return "Bilibili";
+  if (lowerUrl.includes("youtube")) return "YouTube";
+  if (lowerUrl.includes("818ps") || lowerUrl.includes("tuguaishou")) {
+    return "818ps";
+  }
+  if (lowerUrl.includes("canva")) return "Canva";
+
+  return normalizedPlatform || "Unknown";
+}
+
+function normalizeExtractPayload(result = {}) {
+  const urls = [];
+  const pages = [];
+  const seen = new Set();
+
+  const isBlockedPreviewAssetUrl = (value) => {
+    if (typeof value !== "string") {
+      return true;
+    }
+
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) {
+      return true;
+    }
+
+    if (/^data:image\//.test(normalized) || /^blob:/.test(normalized)) {
+      return false;
+    }
+
+    if (/^https?:\/\/hm\.baidu\.com\/hm\.gif/.test(normalized)) return true;
+    if (/googletagmanager|google-analytics|doubleclick|umeng|clarity/.test(normalized)) {
+      return true;
+    }
+    if (/\/distheadless\/img\//.test(normalized)) return true;
+    if (/full-screen|fullscreen|favicon|tracker|tracking|pixel/.test(normalized)) {
+      return true;
+    }
+
+    return false;
+  };
+
+  const addUrl = (value) => {
+    if (typeof value !== "string") {
+      return null;
+    }
+
+    const normalized = value.trim();
+    if (!normalized || isBlockedPreviewAssetUrl(normalized) || seen.has(normalized)) {
+      return null;
+    }
+
+    seen.add(normalized);
+    urls.push(normalized);
+    return normalized;
+  };
+
+  const addPage = (page, fallbackPageNumber) => {
+    const imageUrl = addUrl(page && page.imageUrl);
+    if (!imageUrl) {
+      return;
+    }
+
+    pages.push({
+      page: Number(page && page.page) || fallbackPageNumber || pages.length + 1,
+      imageUrl,
+    });
+  };
+
+  (result.pages || []).forEach((page, index) => addPage(page, index + 1));
+  (result.imageUrls || []).forEach(addUrl);
+  (result.images || []).forEach(addUrl);
+  addUrl(result.imageUrl);
+  addUrl(result.thumbnailUrl);
+
+  if (!pages.length) {
+    urls.forEach((imageUrl, index) => {
+      pages.push({
+        page: index + 1,
+        imageUrl,
+      });
+    });
+  }
+
+  return {
+    ...result,
+    imageUrl: urls[0] || null,
+    thumbnailUrl: result.thumbnailUrl || result.imageUrl || urls[0] || null,
+    imageUrls: urls,
+    images: urls,
+    pages,
+    pageCount: Number(result.pageCount) || pages.length || urls.length,
+    isMultiPage:
+      typeof result.isMultiPage === "boolean"
+        ? result.isMultiPage
+        : urls.length > 1,
+  };
+}
+
+async function ensureParseRecordColumns() {
+  const requiredColumns = {
+    image_urls_json: "LONGTEXT NULL",
+    pages_json: "LONGTEXT NULL",
+    page_count: "INT NULL DEFAULT 1",
+    is_multi_page: "TINYINT(1) NOT NULL DEFAULT 0",
+  };
+
+  for (const [columnName, definition] of Object.entries(requiredColumns)) {
+    const [rows] = await pool.query(
+      "SHOW COLUMNS FROM parse_records LIKE ?",
+      [columnName]
+    );
+
+    if (!rows.length) {
+      await pool.query(
+        `ALTER TABLE parse_records ADD COLUMN ${columnName} ${definition}`
+      );
+    }
+  }
+}
+
 app.get("/api/history", async (req, res) => {
   try {
     const [rows] = await pool.query(
@@ -207,7 +466,17 @@ app.get("/api/history", async (req, res) => {
 
 // 2. 创建新的解析任务
 app.post("/api/parse", async (req, res) => {
-  const { url, platform, thumbnailUrl, status = "success" } = req.body;
+  const {
+    url,
+    platform,
+    thumbnailUrl,
+    imageUrl,
+    imageUrls,
+    pages,
+    pageCount,
+    isMultiPage,
+    status = "success",
+  } = req.body;
 
   if (!url) {
     return res.status(400).json({ success: false, message: "URL 不能为空" });
@@ -223,21 +492,36 @@ app.post("/api/parse", async (req, res) => {
 
   try {
     // 尝试从URL中提取真实的图片链接
-    let finalThumbnailUrl = thumbnailUrl;
-
-    // 如果是 818ps 链接，尝试提取图片ID
-    if (url.includes("818ps.com")) {
-      const urlObj = new URL(url);
-      const picId = urlObj.searchParams.get("picId");
-      if (picId) {
-        // 构建真实的图片URL（这里需要根据实际的818ps API调整）
-        finalThumbnailUrl = `https://818ps.com/images/${picId}.jpg`;
-      }
-    }
+    const resolvedPlatform = resolvePlatform(url, platform);
+    const normalizedPayload = normalizeExtractPayload({
+      thumbnailUrl,
+      imageUrl,
+      imageUrls,
+      pages,
+      pageCount,
+      isMultiPage,
+    });
+    const finalThumbnailUrl = normalizedPayload.thumbnailUrl;
+    const finalImageUrls = normalizedPayload.imageUrls || [];
+    const finalPages = normalizedPayload.pages || [];
+    const finalPageCount = normalizedPayload.pageCount || finalImageUrls.length || 0;
+    const finalIsMultiPage =
+      typeof normalizedPayload.isMultiPage === "boolean"
+        ? normalizedPayload.isMultiPage
+        : finalImageUrls.length > 1;
 
     const [result] = await pool.query(
-      "INSERT INTO parse_records (original_url, platform, thumbnail_url, status) VALUES (?, ?, ?, ?)",
-      [url, platform || "Unknown", finalThumbnailUrl, status]
+      "INSERT INTO parse_records (original_url, platform, thumbnail_url, status, image_urls_json, pages_json, page_count, is_multi_page) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      [
+        url,
+        resolvedPlatform,
+        finalThumbnailUrl,
+        status,
+        JSON.stringify(finalImageUrls),
+        JSON.stringify(finalPages),
+        finalPageCount,
+        finalIsMultiPage ? 1 : 0,
+      ]
     );
 
     res.json({
@@ -245,9 +529,21 @@ app.post("/api/parse", async (req, res) => {
       data: {
         id: result.insertId,
         originalUrl: url,
-        platform,
+        original_url: url,
+        platform: resolvedPlatform,
         thumbnailUrl: finalThumbnailUrl,
+        thumbnail_url: finalThumbnailUrl,
+        imageUrl: normalizedPayload.imageUrl || finalThumbnailUrl || null,
+        imageUrls: finalImageUrls,
+        image_urls_json: JSON.stringify(finalImageUrls),
+        pages: finalPages,
+        pages_json: JSON.stringify(finalPages),
+        pageCount: finalPageCount,
+        page_count: finalPageCount,
+        isMultiPage: finalIsMultiPage,
+        is_multi_page: finalIsMultiPage ? 1 : 0,
         status,
+        created_at: new Date().toISOString(),
         timestamp: new Date().toLocaleString("zh-CN", { hour12: false }),
       },
     });
@@ -299,16 +595,8 @@ app.post("/api/extract-image", async (req, res) => {
     });
   }
 
-  if (!platform || typeof platform !== "string") {
-    console.error(`[${requestId}] ❌ 缺少或无效的 platform 参数`);
-    return res.status(400).json({
-      success: false,
-      message: "缺少必要参数: platform（必须是字符串）",
-      requestId,
-    });
-  }
-
-  console.log(`[${requestId}] 参数验证通过，平台: ${platform}`);
+  const resolvedPlatform = resolvePlatform(url, platform);
+  console.log(`[${requestId}] 参数验证通过，平台: ${resolvedPlatform}`);
 
   try {
     // 验证 URL 格式
@@ -325,7 +613,10 @@ app.post("/api/extract-image", async (req, res) => {
 
     // 使用图片提取服务（架构级优化：优先第三方 API）
     console.log(`[${requestId}] 🔍 调用 extractImage 服务...`);
-    const result = await extractImage(url, platform);
+    console.log(`[${requestId}] 🔍 调用 extractImage 服务...`);
+    const result = normalizeExtractPayload(
+      await extractImage(url, resolvedPlatform)
+    );
 
     console.log(
       `[${requestId}] ✅ 图片提取成功，来源: ${result.source || "unknown"}`
@@ -335,7 +626,13 @@ app.post("/api/extract-image", async (req, res) => {
     const payload = {
       success: true,
       imageUrl: result.imageUrl || null,
-      platform: result.platform || null,
+      thumbnailUrl: result.thumbnailUrl || result.imageUrl || null,
+      imageUrls: result.imageUrls || [],
+      pages: result.pages || [],
+      pageCount: result.pageCount || 0,
+      isMultiPage: Boolean(result.isMultiPage),
+      images: result.images || result.imageUrls || [],
+      platform: result.platform || resolvedPlatform || null,
       source: result.source || null,
     };
     // 透传提醒标记（用于前端弹窗/Toast）
