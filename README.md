@@ -1,517 +1,416 @@
-# 🎯 智能去水印助手
+# 去水印下载助手
 
-基于 Vue 3 + Node.js + MySQL + Element Plus 的全网图片/视频去水印下载工具
+一个基于 Vue 3 + Node.js + MySQL + Puppeteer 的图片/设计稿提取与本地去水印项目。
 
-支持多平台智能识别，采用**8层精确抓取策略**，专门优化创客贴等设计平台的主图提取。
+项目当前分成两条主线能力：
 
-## ✨ 核心特性
+- 在线链接解析：从设计平台或内容平台链接中提取真实图片地址，支持单图和多页套图。
+- 本地图片去水印：上传本地图片后，按自动或指定算法进行处理，并保存处理记录。
 
-- 🎨 **精确设计稿提取** - 专门优化创客贴、818ps等设计平台，获取纯净主图而非页面截图
-- 🖼️ **818ps 套图提取增强** - 支持图怪兽/818ps 多页设计稿整套提取，返回完整页序而非仅首张预览
-- 🌐 **多平台支持** - 支持创客贴、818ps、Canva、抖音、小红书等主流平台
-- 🧠 **智能识别系统** - 8层抓取策略 + 多维度评分算法
-- 🚀 **高质量输出** - 优先获取原图URL，避免截图质量损失
-- 📱 **响应式设计** - 完美适配桌面端和移动端
-- 📊 **历史记录管理** - 智能搜索、一键删除、实时过滤
+## 功能概览
 
-## 🆕 最近更新
+### 1. 在线链接解析
 
-### 818ps / 图怪兽套图提取优化
+重点优化的平台：
 
-- 支持从 `/u/...` 这类分享短链自动跟随跳转，解析最终分享页中的 `share_id`、`share_uid`、`upicId`
-- 优先调用 818ps 官方分享接口提取整套预览图，减少只拿到第一页的情况
-- 对多页设计稿统一返回 `imageUrls`、`pages`、`pageCount`、`isMultiPage`
-- 修复 818ps 多页预览图排序，确保 `第1页 -> 第2页 -> 第3页` 顺序稳定
-- 强化动态兜底逻辑，页码识别和逐页激活更接近真实用户操作
+- 创客贴 `chuangkit.com`
+- 818ps / 图怪兽相关链接
+- Canva
+- 抖音
+- 小红书
 
-## 🛠️ 技术栈
+解析结果统一返回：
 
-### 前端技术
-- **Vue 3** - 组合式API + 响应式系统
-- **Vuex 4** - 状态管理
-- **Element Plus** - UI组件库
-- **Axios** - HTTP客户端
-- **Vite** - 构建工具
+- `imageUrl`：主图地址
+- `thumbnailUrl`：缩略图/首图地址
+- `imageUrls`：全部图片地址
+- `pages`：分页信息
+- `pageCount`：总页数
+- `isMultiPage`：是否为多页
 
-### 后端技术
-- **Node.js** - 服务器运行时
-- **Express** - Web框架
-- **MySQL** - 数据库
-- **Puppeteer** - 浏览器自动化
-- **Cheerio** - 服务端DOM解析
+### 2. 本地图片去水印
 
-## 🚀 快速开始
+支持格式：
 
-### 环境要求
-- Node.js >= 18.0.0
-- MySQL >= 8.0
-- Chrome/Chromium (Puppeteer自动下载)
+- PNG
+- JPG / JPEG
+- WebP
+
+最大上传体积：
+
+- 10 MB
+
+可用算法：
+
+- `auto`：智能自动模式，按检测结果自动选择最佳方案
+- `hybrid`：综合处理方案
+- `advanced`：高级模式
+- `fast`：快速模式
+
+### 3. 历史记录管理
+
+- 保存解析记录到 MySQL
+- 支持查看最近 50 条记录
+- 支持按链接/平台搜索
+- 支持删除记录
+- 支持多页结果展示与下载
+
+## 技术栈
+
+### 前端
+
+- Vue 3
+- Vuex 4
+- Element Plus
+- Vite
+- Axios
+
+### 后端
+
+- Node.js
+- Express
+- MySQL 8
+- Puppeteer / puppeteer-extra / stealth plugin
+- Sharp
+- Cheerio
+- Multer
+
+## 项目结构
+
+```text
+.
+├─ client/                    前端项目
+│  ├─ src/
+│  │  ├─ components/          页面组件
+│  │  ├─ store/               Vuex 状态管理
+│  │  └─ App.vue              主页面
+│  └─ vite.config.js          前端开发代理配置
+├─ server/                    后端项目
+│  ├─ extractors/             平台提取器
+│  ├─ services/               浏览器与提取相关服务
+│  ├─ uploads/                本地上传与处理后的图片
+│  ├─ imageExtractor.js       链接提取总入口
+│  ├─ index.js                Express 服务入口
+│  └─ watermarkRemoval.js     本地去水印逻辑
+├─ database/
+│  └─ schema.sql              初始数据库结构
+└─ README.md
+```
+
+## 运行环境
+
+- Node.js 18 及以上
+- MySQL 8 及以上
+- 能正常启动 Puppeteer 的 Chrome / Chromium 环境
+
+如果 Puppeteer 无法自动找到浏览器，可以通过环境变量指定：
+
+- `PUPPETEER_EXECUTABLE_PATH`
+
+## 快速开始
 
 ### 1. 克隆项目
+
 ```bash
 git clone https://github.com/cy15205969311/watermark.git
 cd watermark
 ```
 
-### 2. 数据库配置
-
-确保MySQL服务已启动，然后创建数据库：
+### 2. 初始化数据库
 
 ```bash
-# 方式1：直接导入
 mysql -u root -p < database/schema.sql
-
-# 方式2：手动执行
-mysql -u root -p
-source database/schema.sql
 ```
 
-### 3. 后端配置
+默认数据库名：
 
-```bash
-cd server
-npm install
-```
+- `watermark_remover`
 
-环境变量配置 (`.env` 已预配置)：
+说明：
+
+- 项目启动时会自动检查并补齐 `parse_records` 表中的多页字段：
+  - `image_urls_json`
+  - `pages_json`
+  - `page_count`
+  - `is_multi_page`
+
+### 3. 配置后端环境变量
+
+在 `server/` 目录下创建 `.env`：
+
 ```env
 DB_HOST=localhost
 DB_USER=root
 DB_PASSWORD=root
 DB_NAME=watermark_remover
 PORT=3000
+
+# 可选
+PUPPETEER_EXECUTABLE_PATH=C:\Program Files\Google\Chrome\Application\chrome.exe
 ```
 
-### 4. 前端配置
+### 4. 安装依赖
+
+后端：
 
 ```bash
-cd client
+cd server
+npm install
+```
+
+前端：
+
+```bash
+cd ../client
 npm install
 ```
 
 ### 5. 启动项目
 
-**后端服务**：
+启动后端：
+
 ```bash
 cd server
 npm start
-# 或开发模式: npm run dev
 ```
 
-**前端服务**：
+开发模式：
+
+```bash
+cd server
+npm run dev
+```
+
+启动前端：
+
 ```bash
 cd client
 npm run dev
 ```
 
-访问 http://localhost:5173 开始使用！
+默认访问地址：
 
-## 🎯 核心功能
+- 前端：http://localhost:5173
+- 后端：http://localhost:3000
 
-### 🎨 精确设计稿提取
-- **创客贴优化** - 8层抓取策略，获取纯净设计稿主图
-- **818ps 套图优化** - 分享短链自动解析，优先走官方分享 API 获取完整套图
-- **智能识别** - 自动区分设计稿内容和页面UI
-- **质量优先** - 原图URL > 精确截图 > DOM回退
-- **内容清理** - 自动移除水印、导航栏、空白区域
+前端开发环境已通过 `client/vite.config.js` 代理 `/api` 到 `http://localhost:3000`。
 
-### 🌐 多平台支持
-- **设计平台** - 创客贴、818ps、Canva
-- **社交媒体** - 抖音、小红书、快手
-- **视频平台** - B站、YouTube等
-- **智能识别** - 自动检测平台类型
+## 主要接口
 
-### 📊 智能管理
-- **历史记录** - 自动保存提取记录
-- **实时搜索** - 关键词快速过滤
-- **批量操作** - 一键删除、批量下载
-- **状态追踪** - 成功/失败状态显示
+### 1. 提取在线图片
 
-### 🔧 技术特性
-- **网络拦截** - 直接获取原始图片URL
-- **元素定位** - 30+专门选择器精确定位
-- **智能评分** - 多维度评分算法选择最佳内容
-- **边界检测** - 自动裁剪空白区域
-- **错误处理** - 详细错误信息和用户指导
+`POST /api/extract-image`
 
-## 📡 API 接口
+请求体：
 
-### 核心接口
-
-#### 提取图片/视频
-```http
-POST /api/extract-image
-Content-Type: application/json
-
+```json
 {
   "url": "https://www.chuangkit.com/sharedesign?d=xxx",
-  "platform": "Chuangkit"
+  "platform": "Unknown"
 }
 ```
 
-#### 解析链接
-```http
-POST /api/parse
-Content-Type: application/json
+成功响应示例：
 
+```json
 {
-  "url": "目标链接",
-  "platform": "平台名称",
-  "thumbnailUrl": "缩略图URL",
+  "success": true,
+  "platform": "Chuangkit",
+  "source": "puppeteer-url",
+  "imageUrl": "https://example.com/1.png",
+  "thumbnailUrl": "https://example.com/1.png",
+  "imageUrls": [
+    "https://example.com/1.png",
+    "https://example.com/2.png"
+  ],
+  "pages": [
+    { "page": 1, "imageUrl": "https://example.com/1.png" },
+    { "page": 2, "imageUrl": "https://example.com/2.png" }
+  ],
+  "pageCount": 2,
+  "isMultiPage": true,
+  "images": [
+    "https://example.com/1.png",
+    "https://example.com/2.png"
+  ]
+}
+```
+
+说明：
+
+- 某些平台在兜底模式下可能返回 `data:image/...` 的截图结果。
+- 后端会尽量过滤统计图、跟踪图、无效缩略图等脏资源。
+
+### 2. 保存解析记录
+
+`POST /api/parse`
+
+请求体示例：
+
+```json
+{
+  "url": "https://www.chuangkit.com/sharedesign?d=xxx",
+  "platform": "Chuangkit",
+  "thumbnailUrl": "https://example.com/1.png",
+  "imageUrl": "https://example.com/1.png",
+  "imageUrls": [
+    "https://example.com/1.png",
+    "https://example.com/2.png"
+  ],
+  "pages": [
+    { "page": 1, "imageUrl": "https://example.com/1.png" },
+    { "page": 2, "imageUrl": "https://example.com/2.png" }
+  ],
+  "pageCount": 2,
+  "isMultiPage": true,
   "status": "success"
 }
 ```
 
-### 历史记录管理
+### 3. 获取历史记录
 
-#### 获取历史记录
-```http
-GET /api/history
-```
+`GET /api/history`
 
-#### 搜索记录
-```http
-GET /api/history/search?query=关键词
-```
+### 4. 搜索历史记录
 
-#### 删除记录
-```http
-DELETE /api/history/:id
-```
+`GET /api/history/search?query=关键词`
 
-### 响应格式
+### 5. 删除历史记录
 
-**成功响应**：
+`DELETE /api/history/:id`
+
+### 6. 本地图片去水印
+
+`POST /api/upload-image?method=auto`
+
+表单字段：
+
+- `image`：上传文件
+
+`method` 可选值：
+
+- `auto`
+- `hybrid`
+- `advanced`
+- `fast`
+
+成功响应示例：
+
 ```json
 {
   "success": true,
-  "platform": "818ps",
-  "source": "share_api_share_template",
-  "imageUrl": "第一页图片URL",
-  "imageUrls": [
-    "第1页图片URL",
-    "第2页图片URL",
-    "第3页图片URL"
-  ],
-  "pages": [
-    { "page": 1, "imageUrl": "第1页图片URL" },
-    { "page": 2, "imageUrl": "第2页图片URL" },
-    { "page": 3, "imageUrl": "第3页图片URL" }
-  ],
-  "pageCount": 3,
-  "isMultiPage": true,
-  "originalUrl": "用户提交的原始分享链接",
-  "resolvedUrl": "818ps 最终跳转后的分享页链接"
+  "imageUrl": "http://localhost:3000/uploads/xxx-processed.jpg",
+  "originalUrl": "http://localhost:3000/uploads/xxx.jpg",
+  "requestedMethod": "auto",
+  "requestedMethodLabel": "智能自动",
+  "method": "advanced",
+  "methodLabel": "高级模式",
+  "fallbackUsed": false,
+  "attemptedMethods": [],
+  "detection": {},
+  "qualityScore": 87,
+  "selectionReason": "通过质量检查，亮度和细节保持稳定",
+  "outputFormat": "jpeg",
+  "message": "已使用高级模式完成去水印"
 }
 ```
 
-**错误响应**：
-```json
-{
-  "success": false,
-  "error": "错误信息",
-  "details": "详细错误描述"
-}
-```
+## 当前实现特点
 
-## 📁 项目结构
+### 创客贴
 
-```
-watermark/
-├── 📁 client/                    # Vue 3 前端应用
-│   ├── 📁 src/
-│   │   ├── 📁 components/        # Vue组件
-│   │   │   ├── DownloadDialog.vue    # 下载对话框
-│   │   │   ├── HistoryItem.vue       # 历史记录项
-│   │   │   └── PlatformIcons.vue     # 平台图标
-│   │   ├── 📁 services/          # 服务层
-│   │   │   └── parseService.js       # 解析服务
-│   │   ├── 📁 store/             # Vuex状态管理
-│   │   │   └── index.js              # 主store
-│   │   ├── App.vue               # 主应用组件
-│   │   └── main.js               # 应用入口
-│   ├── 📁 public/                # 静态资源
-│   │   └── 📁 tutorial/          # 教程图片
-│   ├── index.html                # HTML模板
-│   ├── vite.config.js            # Vite配置
-│   └── package.json              # 前端依赖
-├── 📁 server/                    # Node.js 后端服务
-│   ├── 📁 services/              # 核心服务
-│   │   └── browser.js            # 浏览器自动化服务
-│   ├── 📁 uploads/               # 文件上传目录
-│   ├── index.js                  # Express服务器
-│   ├── imageExtractor.js         # 图片提取核心逻辑
-│   ├── thirdPartyApiGateway.js   # 第三方API网关
-│   ├── watermarkRemoval.js       # 去水印处理
-│   ├── .env                      # 环境变量
-│   └── package.json              # 后端依赖
-├── 📁 database/                  # 数据库相关
-│   └── schema.sql                # 数据库结构
-├── 📄 deploy.sh                  # 自动部署脚本
-├── 📄 nginx.conf                 # Nginx配置
-├── 📄 railway.json               # Railway部署配置
-└── 📄 README.md                  # 项目文档
-```
+- 支持分享链接抓取
+- 支持多页结果返回
+- 增强了网络响应抓取、DOM 候选收集、缩略图遍历和脏资源过滤
+- 会过滤统计图、UI 图标、无效 SVG 等资源
 
-## 🎨 8层精确抓取策略
+### 818ps / 图怪兽
 
-### 创客贴专项优化
+- 支持多页设计稿提取
+- 返回稳定的 `imageUrls/pages/pageCount`
+- 优先走更完整的分享页和套图提取逻辑
 
-我们专门针对创客贴等设计平台开发了8层抓取策略，确保获取纯净的设计稿主图：
+### 本地去水印
 
-#### 1. 🌐 网络请求拦截
-- 直接捕获设计稿图片URL
-- 专门的评分系统 (文件大小 + 关键词匹配)
-- 设计稿特征识别 (+800分)
-- UI元素过滤 (-1000分)
+- 增加了自动模式质量评估
+- 会根据检测结果在多种方案中选择更稳的输出
+- 指定模式失败时，可自动回退到智能模式
 
-#### 2. 🎯 精确元素定位
-- 30+专门的设计稿容器选择器
-- `.design-preview-main`, `.work-preview-main`
-- `.template-preview-main`, `.main-design-container`
-- 创客贴特有容器识别
+## 开发说明
 
-#### 3. 🧹 高级内容清理
-- CSS隐藏：导航栏、工具栏、侧边栏
-- JavaScript清理：动态移除UI元素
-- 水印移除：自动识别和隐藏水印层
-- 背景透明化：突出设计稿内容
+### 常用命令
 
-#### 4. 📊 智能容器评分
-- **面积评分** - 基础分数计算
-- **位置评分** - 居中元素优先
-- **尺寸检查** - 合理尺寸验证
-- **内容密度** - 图片/文本/Canvas内容加分
+前端：
 
-#### 5. 📐 智能边界检测
-- 自动识别设计稿边界
-- 精确截图设计稿区域
-- 去除空白区域
-- 保持内容完整性
-
-#### 6. 🔄 URL回退策略
-- 使用网络拦截的高质量图片
-- 原图URL优先级最高
-- 避免截图质量损失
-
-#### 7. 🔍 DOM扫描回退
-- 查找页面中所有设计稿图片
-- 按面积排序选择最大图片
-- 尺寸过滤 (>200x200)
-
-#### 8. ❌ 错误处理
-- 详细的错误诊断信息
-- 用户友好的失败原因说明
-- 操作建议和解决方案
-
-### 效果对比
-
-| 项目 | 优化前 | 优化后 |
-|------|--------|--------|
-| **抓取内容** | 整个页面截图 ❌ | 纯净设计稿主图 ✅ |
-| **图片质量** | 包含UI和空白 ❌ | 高质量原图/精确截图 ✅ |
-| **内容识别** | 简单选择器 ❌ | 8层策略智能识别 ✅ |
-| **成功率** | 低成功率 ❌ | 多重保障高成功率 ✅ |
-
-## 🚀 部署指南
-
-### 自动化部署 (推荐)
-
-使用提供的自动化部署脚本：
-
-```bash
-chmod +x deploy.sh
-./deploy.sh
-```
-
-脚本将自动完成：
-- 系统依赖安装 (Node.js, MySQL, Nginx)
-- 项目配置和构建
-- 服务启动和进程管理
-- Nginx反向代理配置
-
-### 手动部署
-
-#### 1. 服务器环境
-```bash
-# Ubuntu/Debian
-sudo apt update
-sudo apt install nodejs npm mysql-server nginx
-
-# CentOS/RHEL
-sudo yum install nodejs npm mysql-server nginx
-```
-
-#### 2. 数据库配置
-```bash
-sudo mysql_secure_installation
-mysql -u root -p < database/schema.sql
-```
-
-#### 3. 应用部署
-```bash
-# 后端
-cd server
-npm install --production
-npm install -g pm2
-pm2 start ecosystem.config.js
-
-# 前端构建
-cd ../client
-npm install
-npm run build
-```
-
-#### 4. Nginx配置
-```bash
-sudo cp nginx.conf /etc/nginx/sites-available/watermark-remover
-sudo ln -s /etc/nginx/sites-available/watermark-remover /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl reload nginx
-```
-
-### 免费部署选项
-
-#### Railway (推荐)
-1. 连接GitHub仓库
-2. 使用提供的 `railway.json` 配置
-3. 自动部署和域名分配
-
-#### Vercel + PlanetScale
-- 前端：Vercel自动部署
-- 数据库：PlanetScale免费MySQL
-- 后端：Railway或Render
-
-## 🔧 开发指南
-
-### 开发环境配置
-
-#### 后端开发
-```bash
-cd server
-npm run dev  # 使用nodemon自动重启
-```
-
-#### 前端开发
 ```bash
 cd client
-npm run dev  # Vite热更新
+npm run dev
+npm run build
+npm run preview
 ```
 
-### 环境变量配置
+后端：
 
-创建 `server/.env` 文件：
-```env
-# 数据库配置
-DB_HOST=localhost
-DB_USER=root
-DB_PASSWORD=root
-DB_NAME=watermark_remover
-
-# 服务配置
-PORT=3000
-NODE_ENV=development
-
-# Puppeteer配置 (可选)
-PUPPETEER_EXECUTABLE_PATH=/path/to/chrome
-```
-
-### 调试技巧
-
-#### 1. 后端调试
 ```bash
-# 启用详细日志
-DEBUG=* npm run dev
-
-# 查看数据库连接
-mysql -u root -p -e "SHOW DATABASES;"
+cd server
+npm start
+npm run dev
 ```
 
-#### 2. 前端调试
-- 使用Vue DevTools浏览器扩展
-- 检查Network面板查看API请求
-- Console查看Vuex状态变化
+### 代码入口
 
-#### 3. 抓取调试
-```bash
-# 测试特定平台
-node -e "
-const { extractImage } = require('./server/imageExtractor');
-extractImage('https://www.chuangkit.com/sharedesign?d=xxx', 'Chuangkit')
-  .then(console.log)
-  .catch(console.error);
-"
-```
+- 前端主界面：`client/src/App.vue`
+- 前端状态管理：`client/src/store/index.js`
+- 后端 API：`server/index.js`
+- 链接提取总入口：`server/imageExtractor.js`
+- 浏览器抓取：`server/services/browser.js`
+- 本地去水印：`server/watermarkRemoval.js`
 
-### 代码规范
+## 常见问题
 
-#### 前端规范
-- 使用Vue 3 Composition API
-- 组件命名采用PascalCase
-- 使用TypeScript类型注解 (可选)
+### 1. 启动后提示 MySQL 连接失败
 
-#### 后端规范
-- 使用ES6+ 语法
-- 异步操作使用async/await
-- 错误处理使用try-catch
+请检查：
 
-## 🐛 常见问题
+- MySQL 服务是否已启动
+- `server/.env` 中的数据库账号密码是否正确
+- 数据库 `watermark_remover` 是否已创建
 
-### Q: 创客贴抓取失败？
-**A**: 检查以下几点：
-1. 链接是否为有效的分享链接
-2. 设计稿是否为公开状态
-3. 网络连接是否正常
-4. Chrome/Chromium是否正确安装
+### 2. 前端打不开图片或列表出现空白缩略图
 
-### Q: 数据库连接失败？
-**A**: 确认：
-1. MySQL服务是否启动
-2. 用户名密码是否正确 (默认root/root)
-3. 数据库是否已创建
-4. 防火墙是否阻止连接
+优先检查：
 
-### Q: 前端无法访问后端API？
-**A**: 检查：
-1. 后端服务是否在3000端口运行
-2. CORS配置是否正确
-3. 代理配置是否生效 (开发环境)
+- 后端是否已成功返回真实 `imageUrls/pages`
+- 历史记录中是否残留旧数据
+- 目标链接是否已经失效或需要登录
 
-### Q: Puppeteer启动失败？
-**A**: 解决方案：
-1. 安装Chrome/Chromium浏览器
-2. 设置PUPPETEER_EXECUTABLE_PATH环境变量
-3. 检查系统依赖是否完整
+说明：
 
-## 🤝 贡献指南
+- 当前版本已经对创客贴的统计图、UI 图、无效缩略图做了过滤。
 
-### 提交代码
-1. Fork项目到个人仓库
-2. 创建功能分支: `git checkout -b feature/new-feature`
-3. 提交更改: `git commit -m 'Add new feature'`
-4. 推送分支: `git push origin feature/new-feature`
-5. 创建Pull Request
+### 3. Puppeteer 启动失败
 
-### 报告问题
-- 使用GitHub Issues报告bug
-- 提供详细的错误信息和复现步骤
-- 包含系统环境信息
+可以尝试：
 
-### 功能建议
-- 在Issues中提出新功能建议
-- 描述使用场景和预期效果
-- 讨论实现方案
+- 安装本机 Chrome / Chromium
+- 设置 `PUPPETEER_EXECUTABLE_PATH`
+- 检查系统是否缺少浏览器依赖
 
-## 📄 许可证
+### 4. 本地上传处理后仍然效果不好
 
-MIT License - 详见 [LICENSE](LICENSE) 文件
+建议：
 
-## 🙏 致谢
+- 优先用 `auto`
+- 如果图片结构简单，可试 `advanced`
+- 如果更在意速度，可试 `fast`
+- 复杂海报类图片一般优先 `hybrid` 或 `auto`
 
-- Vue.js团队 - 优秀的前端框架
-- Element Plus - 美观的UI组件库
-- Puppeteer团队 - 强大的浏览器自动化工具
-- 所有贡献者和用户的支持
+## 注意事项
 
----
+- 并非所有平台都能保证 100% 获取无水印原图，部分场景只能返回截图或预览图。
+- 第三方平台的页面结构经常变化，某些链接可能需要后续适配。
+- 本项目会保存解析记录到数据库，也会把本地上传图片保存到 `server/uploads/`。
 
-**⭐ 如果这个项目对你有帮助，请给个Star支持一下！**
+## License
+
+MIT
