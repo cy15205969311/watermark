@@ -7,11 +7,22 @@
 ## ✨ 核心特性
 
 - 🎨 **精确设计稿提取** - 专门优化创客贴、818ps等设计平台，获取纯净主图而非页面截图
+- 🖼️ **818ps 套图提取增强** - 支持图怪兽/818ps 多页设计稿整套提取，返回完整页序而非仅首张预览
 - 🌐 **多平台支持** - 支持创客贴、818ps、Canva、抖音、小红书等主流平台
 - 🧠 **智能识别系统** - 8层抓取策略 + 多维度评分算法
 - 🚀 **高质量输出** - 优先获取原图URL，避免截图质量损失
 - 📱 **响应式设计** - 完美适配桌面端和移动端
 - 📊 **历史记录管理** - 智能搜索、一键删除、实时过滤
+
+## 🆕 最近更新
+
+### 818ps / 图怪兽套图提取优化
+
+- 支持从 `/u/...` 这类分享短链自动跟随跳转，解析最终分享页中的 `share_id`、`share_uid`、`upicId`
+- 优先调用 818ps 官方分享接口提取整套预览图，减少只拿到第一页的情况
+- 对多页设计稿统一返回 `imageUrls`、`pages`、`pageCount`、`isMultiPage`
+- 修复 818ps 多页预览图排序，确保 `第1页 -> 第2页 -> 第3页` 顺序稳定
+- 强化动态兜底逻辑，页码识别和逐页激活更接近真实用户操作
 
 ## 🛠️ 技术栈
 
@@ -32,14 +43,14 @@
 ## 🚀 快速开始
 
 ### 环境要求
-- Node.js >= 16.0.0
+- Node.js >= 18.0.0
 - MySQL >= 8.0
 - Chrome/Chromium (Puppeteer自动下载)
 
 ### 1. 克隆项目
 ```bash
-git clone <your-repo-url>
-cd watermark-remover
+git clone https://github.com/cy15205969311/watermark.git
+cd watermark
 ```
 
 ### 2. 数据库配置
@@ -99,6 +110,7 @@ npm run dev
 
 ### 🎨 精确设计稿提取
 - **创客贴优化** - 8层抓取策略，获取纯净设计稿主图
+- **818ps 套图优化** - 分享短链自动解析，优先走官方分享 API 获取完整套图
 - **智能识别** - 自动区分设计稿内容和页面UI
 - **质量优先** - 原图URL > 精确截图 > DOM回退
 - **内容清理** - 自动移除水印、导航栏、空白区域
@@ -173,11 +185,23 @@ DELETE /api/history/:id
 ```json
 {
   "success": true,
-  "imageUrl": "提取到的图片URL",
-  "platform": "平台名称",
-  "source": "提取方式",
-  "quality": "图片质量",
-  "linkType": "链接类型"
+  "platform": "818ps",
+  "source": "share_api_share_template",
+  "imageUrl": "第一页图片URL",
+  "imageUrls": [
+    "第1页图片URL",
+    "第2页图片URL",
+    "第3页图片URL"
+  ],
+  "pages": [
+    { "page": 1, "imageUrl": "第1页图片URL" },
+    { "page": 2, "imageUrl": "第2页图片URL" },
+    { "page": 3, "imageUrl": "第3页图片URL" }
+  ],
+  "pageCount": 3,
+  "isMultiPage": true,
+  "originalUrl": "用户提交的原始分享链接",
+  "resolvedUrl": "818ps 最终跳转后的分享页链接"
 }
 ```
 
@@ -193,7 +217,7 @@ DELETE /api/history/:id
 ## 📁 项目结构
 
 ```
-watermark-remover/
+watermark/
 ├── 📁 client/                    # Vue 3 前端应用
 │   ├── 📁 src/
 │   │   ├── 📁 components/        # Vue组件
