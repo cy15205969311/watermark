@@ -337,6 +337,9 @@ function resolvePlatform(url, platform) {
   if (lowerUrl.includes("818ps") || lowerUrl.includes("tuguaishou")) {
     return "818ps";
   }
+  if (lowerUrl.includes("gaoding.com") || lowerUrl.includes("gaoding.cn")) {
+    return "Gaoding";
+  }
   if (lowerUrl.includes("canva")) return "Canva";
 
   return normalizedPlatform || "Unknown";

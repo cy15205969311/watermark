@@ -289,6 +289,7 @@ function detectPlatformFromUrl(url = '') {
   if (lowerUrl.includes('bilibili')) return 'Bilibili'
   if (lowerUrl.includes('youtube')) return 'YouTube'
   if (lowerUrl.includes('818ps') || lowerUrl.includes('tuguaishou')) return '818ps'
+  if (lowerUrl.includes('gaoding.com') || lowerUrl.includes('gaoding.cn')) return 'Gaoding'
   if (lowerUrl.includes('canva')) return 'Canva'
 
   return 'Unknown'

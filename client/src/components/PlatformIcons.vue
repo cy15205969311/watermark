@@ -21,7 +21,8 @@
 <script setup>
 const platforms = [
   { name: '图怪兽', color: '#16a34a', textColor: '#ffffff' },
-  { name: '创客贴', color: '#10b981', textColor: '#ffffff' }
+  { name: '创客贴', color: '#10b981', textColor: '#ffffff' },
+  { name: '稿定设计', color: '#f97316', textColor: '#ffffff' }
 ]
 </script>
 

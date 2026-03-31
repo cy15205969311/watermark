@@ -9,6 +9,7 @@ const cheerio = require("cheerio");
 const qs = require("querystring");
 const { extractViaThirdPartyAPIWithCache } = require("./thirdPartyApiGateway");
 const { extract818ps } = require("./extractors/818ps");
+const { extractGaoding } = require("./extractors/gaoding");
 const {
   scrapeWithBrowser,
   scrape818ps,
@@ -1456,6 +1457,34 @@ async function extractChuangkitImageEnhanced(url) {
   }
 }
 
+async function extractGaodingImage(url) {
+  try {
+    console.log("Starting Gaoding extraction:", url);
+
+    const result = await extractGaoding(url, {
+      timeout: 15000,
+      headless: true,
+    });
+
+    if (result && result.success && result.imageUrl) {
+      console.log("Gaoding extractor hit:", {
+        source: result.source,
+        pageCount: result.pageCount || 1,
+        linkType: result.linkType,
+      });
+      return result;
+    }
+
+    throw new Error(
+      (result && (result.error || result.message)) ||
+        "Unable to extract Gaoding images"
+    );
+  } catch (error) {
+    console.error("Gaoding extraction failed:", error.message);
+    throw error;
+  }
+}
+
 async function extractImage(url, platform) {
   console.log("\n=".repeat(60));
   console.log("🚀 开始提取图片");
@@ -1530,6 +1559,13 @@ async function extractImage(url, platform) {
         url.includes("tuguaishou.com")
       ) {
         result = await extract818psImage(url);
+      } else if (
+        platform === "Gaoding" ||
+        platform === "稿定设计" ||
+        url.includes("gaoding.com") ||
+        url.includes("gaoding.cn")
+      ) {
+        result = await extractGaodingImage(url);
       } else if (platform === "Canva" && url.includes("canva")) {
         result = await extractCanvaImage(url);
       } else if (platform === "抖音" && url.includes("douyin")) {
@@ -1580,6 +1616,7 @@ async function extractImage(url, platform) {
 module.exports = {
   extractImage,
   extract818psImage,
+  extractGaodingImage,
   extractCanvaImage,
   extractDouyinImage,
   extractXiaohongshuImage,

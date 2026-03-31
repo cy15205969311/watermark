@@ -15,6 +15,7 @@
 
 - 创客贴 `chuangkit.com`
 - 818ps / 图怪兽相关链接
+- 稿定设计 `gaoding.com` / `gaoding.cn`
 - Canva
 - 抖音
 - 小红书
@@ -330,6 +331,14 @@ npm run dev
 - 返回稳定的 `imageUrls/pages/pageCount`
 - 优先走更完整的分享页和套图提取逻辑
 
+### 稿定设计
+
+- 支持 `gaoding.com` / `gaoding.cn` 分享链接识别
+- 自动清理分享文案 fragment，例如 `#我分享了...`
+- 优先从分享页 HTML 中提取 `source_preview_info`、`preview_info` 和 `extends_previews`
+- 支持多页套图返回，统一输出 `imageUrls/pages/pageCount`
+- 对稿定 / `dancf.com` 图片链接自动移除 `x-oss-process`，避免 OSS 处理参数导致资源失效
+
 ### 本地去水印
 
 - 增加了自动模式质量评估
@@ -355,6 +364,7 @@ npm run preview
 cd server
 npm start
 npm run dev
+node test-gaoding.js
 ```
 
 ### 代码入口
@@ -363,6 +373,8 @@ npm run dev
 - 前端状态管理：`client/src/store/index.js`
 - 后端 API：`server/index.js`
 - 链接提取总入口：`server/imageExtractor.js`
+- 稿定提取器：`server/extractors/gaoding.js`
+- 稿定本地验证：`server/test-gaoding.js`
 - 浏览器抓取：`server/services/browser.js`
 - 本地去水印：`server/watermarkRemoval.js`
 
@@ -388,7 +400,21 @@ npm run dev
 
 - 当前版本已经对创客贴的统计图、UI 图、无效缩略图做了过滤。
 
-### 3. Puppeteer 启动失败
+### 3. 稿定分享链接只返回单图或取不到整套图
+
+优先检查：
+
+- 输入链接是否为公开分享链接，而不是需要登录的编辑页
+- 链接中的 `#我分享了...` 之类 fragment 是否已被清理
+- 分享页 HTML 中是否仍存在 `source_preview_info`、`preview_info`、`extends_previews`
+- 图片直链中的 `auth_key` 是否已经过期
+
+说明：
+
+- 当前版本优先走稿定分享页静态提取，命中时会直接返回整套 `pages`
+- 如果分享页结构变化，可能会回退到单图候选或动态兜底
+
+### 4. Puppeteer 启动失败
 
 可以尝试：
 
@@ -396,7 +422,7 @@ npm run dev
 - 设置 `PUPPETEER_EXECUTABLE_PATH`
 - 检查系统是否缺少浏览器依赖
 
-### 4. 本地上传处理后仍然效果不好
+### 5. 本地上传处理后仍然效果不好
 
 建议：
 
