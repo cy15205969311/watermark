@@ -17,6 +17,7 @@ if (typeof global.Blob === "undefined") {
 const express = require("express");
 const mysql = require("mysql2/promise");
 const cors = require("cors");
+const axios = require("axios");
 require("dotenv").config();
 const { extractImage } = require("./imageExtractor");
 const {
@@ -74,6 +75,9 @@ const LOCAL_UPLOAD_IMAGE_MIME_TYPES = new Set([
   "image/png",
   "image/webp",
 ]);
+const IMAGE_PROXY_ALLOWED_HOSTS = [
+  "huabanimg.com",
+];
 
 function normalizeLocalWatermarkMethod(method) {
   const normalized = String(method || "auto").toLowerCase();
@@ -129,6 +133,120 @@ async function runLocalWatermarkRemoval(method, inputPath, outputPath) {
       return removeWatermarkAuto(inputPath, outputPath);
   }
 }
+
+function isAllowedProxyHost(hostname = "") {
+  const normalizedHostname = String(hostname || "").toLowerCase();
+  return IMAGE_PROXY_ALLOWED_HOSTS.some(
+    (allowedHost) =>
+      normalizedHostname === allowedHost ||
+      normalizedHostname.endsWith(`.${allowedHost}`)
+  );
+}
+
+function getImageProxyHeaders(targetUrl) {
+  const headers = {
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+      "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Cache-Control": "no-cache",
+    Pragma: "no-cache",
+  };
+
+  let hostname = "";
+  try {
+    hostname = String(new URL(targetUrl).hostname || "").toLowerCase();
+  } catch {
+    hostname = "";
+  }
+
+  if (hostname === "huabanimg.com" || hostname.endsWith(".huabanimg.com")) {
+    headers.Referer = "https://huaban.com/";
+    headers.Origin = "https://huaban.com";
+  }
+
+  return headers;
+}
+
+app.get("/api/proxy-image", async (req, res) => {
+  const rawUrl = typeof req.query.url === "string" ? req.query.url.trim() : "";
+  if (!rawUrl) {
+    return res.status(400).json({ success: false, message: "缺少图片地址" });
+  }
+
+  let targetUrl;
+  try {
+    targetUrl = new URL(rawUrl);
+  } catch {
+    return res.status(400).json({ success: false, message: "图片地址无效" });
+  }
+
+  if (!["http:", "https:"].includes(targetUrl.protocol)) {
+    return res.status(400).json({ success: false, message: "仅支持 HTTP/HTTPS 图片地址" });
+  }
+
+  if (!isAllowedProxyHost(targetUrl.hostname)) {
+    return res.status(400).json({ success: false, message: "该图片地址不允许代理" });
+  }
+
+  try {
+    const upstream = await axios.get(targetUrl.toString(), {
+      responseType: "stream",
+      timeout: 15000,
+      maxRedirects: 5,
+      headers: getImageProxyHeaders(targetUrl.toString()),
+      validateStatus: () => true,
+    });
+
+    if (![200, 206].includes(upstream.status)) {
+      return res.status(502).json({
+        success: false,
+        message: `图片代理失败: 上游返回 ${upstream.status}`,
+      });
+    }
+
+    const contentType = String(upstream.headers["content-type"] || "").toLowerCase();
+    if (
+      contentType &&
+      !contentType.startsWith("image/") &&
+      !contentType.includes("application/octet-stream")
+    ) {
+      return res.status(502).json({
+        success: false,
+        message: "图片代理失败: 上游未返回图片内容",
+      });
+    }
+
+    res.status(upstream.status);
+    if (contentType) {
+      res.setHeader("Content-Type", contentType);
+    }
+    if (upstream.headers["content-length"]) {
+      res.setHeader("Content-Length", upstream.headers["content-length"]);
+    }
+    res.setHeader("Content-Disposition", "inline");
+    res.setHeader("Cache-Control", "public, max-age=3600");
+
+    upstream.data.on("error", (streamError) => {
+      console.error("图片代理流式传输失败:", streamError.message);
+      if (!res.headersSent) {
+        res.status(502).end("image_proxy_stream_failed");
+      } else {
+        res.destroy(streamError);
+      }
+    });
+
+    upstream.data.pipe(res);
+  } catch (error) {
+    console.error("图片代理失败:", error.message);
+    res.status(502).json({
+      success: false,
+      message: "图片代理失败",
+      error: error.message,
+    });
+  }
+});
 
 // 上传并智能去水印
 app.post("/api/upload-image", upload.single("image"), async (req, res) => {
@@ -340,9 +458,35 @@ function resolvePlatform(url, platform) {
   if (lowerUrl.includes("gaoding.com") || lowerUrl.includes("gaoding.cn")) {
     return "Gaoding";
   }
+  if (
+    lowerUrl.includes("huaban.com") ||
+    lowerUrl.includes("api.huaban.com") ||
+    lowerUrl.includes("huabanimg.com")
+  ) {
+    return "Huaban";
+  }
   if (lowerUrl.includes("canva")) return "Canva";
 
   return normalizedPlatform || "Unknown";
+}
+
+const VALID_RECORD_STATUSES = new Set([
+  "success",
+  "expired",
+  "processing",
+  "preview_image",
+  "preview_only",
+]);
+
+function normalizeRecordStatus(status) {
+  const normalized =
+    typeof status === "string" ? status.trim().toLowerCase() : "";
+
+  if (VALID_RECORD_STATUSES.has(normalized)) {
+    return normalized;
+  }
+
+  return "success";
 }
 
 function normalizeExtractPayload(result = {}) {
@@ -453,6 +597,27 @@ async function ensureParseRecordColumns() {
       );
     }
   }
+
+  const [statusRows] = await pool.query(
+    "SHOW COLUMNS FROM parse_records LIKE ?",
+    ["status"]
+  );
+
+  if (!statusRows.length) {
+    await pool.query(
+      "ALTER TABLE parse_records ADD COLUMN status VARCHAR(32) NOT NULL DEFAULT 'success'"
+    );
+    return;
+  }
+
+  const statusColumn = statusRows[0] || {};
+  const statusColumnType = String(statusColumn.Type || statusColumn.type || "").toLowerCase();
+
+  if (!statusColumnType.startsWith("varchar")) {
+    await pool.query(
+      "ALTER TABLE parse_records MODIFY COLUMN status VARCHAR(32) NOT NULL DEFAULT 'success'"
+    );
+  }
 }
 
 app.get("/api/history", async (req, res) => {
@@ -496,6 +661,7 @@ app.post("/api/parse", async (req, res) => {
   try {
     // 尝试从URL中提取真实的图片链接
     const resolvedPlatform = resolvePlatform(url, platform);
+    const normalizedStatus = normalizeRecordStatus(status);
     const normalizedPayload = normalizeExtractPayload({
       thumbnailUrl,
       imageUrl,
@@ -519,7 +685,7 @@ app.post("/api/parse", async (req, res) => {
         url,
         resolvedPlatform,
         finalThumbnailUrl,
-        status,
+        normalizedStatus,
         JSON.stringify(finalImageUrls),
         JSON.stringify(finalPages),
         finalPageCount,
@@ -545,7 +711,7 @@ app.post("/api/parse", async (req, res) => {
         page_count: finalPageCount,
         isMultiPage: finalIsMultiPage,
         is_multi_page: finalIsMultiPage ? 1 : 0,
-        status,
+        status: normalizedStatus,
         created_at: new Date().toISOString(),
         timestamp: new Date().toLocaleString("zh-CN", { hour12: false }),
       },
@@ -637,10 +803,12 @@ app.post("/api/extract-image", async (req, res) => {
       images: result.images || result.imageUrls || [],
       platform: result.platform || resolvedPlatform || null,
       source: result.source || null,
+      status: normalizeRecordStatus(result.status || "success"),
     };
     // 透传提醒标记（用于前端弹窗/Toast）
     if (result.noticeCode) payload.noticeCode = result.noticeCode;
     if (result.message) payload.message = result.message;
+    if (result.warningText) payload.warningText = result.warningText;
     if (result.quality) payload.quality = result.quality;
     if (result.textLayers) payload.textLayers = result.textLayers;
     res.json(payload);

@@ -290,6 +290,7 @@ function detectPlatformFromUrl(url = '') {
   if (lowerUrl.includes('youtube')) return 'YouTube'
   if (lowerUrl.includes('818ps') || lowerUrl.includes('tuguaishou')) return '818ps'
   if (lowerUrl.includes('gaoding.com') || lowerUrl.includes('gaoding.cn')) return 'Gaoding'
+  if (lowerUrl.includes('huaban.com') || lowerUrl.includes('api.huaban.com') || lowerUrl.includes('huabanimg.com')) return 'Huaban'
   if (lowerUrl.includes('canva')) return 'Canva'
 
   return 'Unknown'
@@ -511,6 +512,7 @@ const handleParse = async () => {
   }
 
   try {
+    store.commit('SET_ERROR', null)
     let originalUrl = inputUrl.value.trim()
 
     // 规范化输入：尝试从文本中提取第一个 URL，如果没有协议则补 https://
@@ -596,13 +598,14 @@ const handleParse = async () => {
 
     // 智能策略：先尝试后端API，失败时使用占位图并显示警告
     console.log('🔄 调用后端API验证图片URL...')
-    let useRealImage = false
     let warningMessage = null
+    let noticeMessage = null
     let extractedImageUrl = thumbnailUrl
     let extractedImageUrls = []
     let extractedPages = []
     let extractedPageCount = 0
     let extractedIsMultiPage = false
+    let extractedStatus = 'success'
 
     try {
       const response = await fetch('/api/extract-image', {
@@ -612,28 +615,65 @@ const handleParse = async () => {
       })
 
       const data = await response.json()
-
-      if (response.ok && data.success && data.imageUrl) {
-        platform = data.platform || platform
-        thumbnailUrl = data.thumbnailUrl || data.imageUrl || thumbnailUrl
-        extractedImageUrl = data.imageUrl || thumbnailUrl
-        extractedImageUrls = Array.isArray(data.imageUrls)
+      const backendImageUrls = getRecordImageUrls({
+        imageUrls: Array.isArray(data.imageUrls)
           ? data.imageUrls
           : Array.isArray(data.images)
             ? data.images
-            : []
-        extractedPages = Array.isArray(data.pages) ? data.pages : []
-        extractedPageCount =
-          Number(data.pageCount) ||
-          extractedPages.length ||
-          extractedImageUrls.length ||
-          (extractedImageUrl ? 1 : 0)
-        extractedIsMultiPage =
-          Boolean(data.isMultiPage) ||
-          extractedPageCount > 1 ||
-          extractedImageUrls.length > 1
-        useRealImage = true
-        console.log('✅ 后端验证成功，使用真实图片:', thumbnailUrl)
+            : [],
+        pages: Array.isArray(data.pages) ? data.pages : [],
+        imageUrl: data.imageUrl || '',
+        thumbnailUrl: data.thumbnailUrl || ''
+      })
+      const backendPages = normalizePages(
+        Array.isArray(data.pages) ? data.pages : [],
+        backendImageUrls
+      )
+      const backendStatus = data.status || 'success'
+
+      if (response.ok && data.success) {
+        if (backendStatus === 'preview_only' && backendImageUrls.length === 0) {
+          noticeMessage =
+            data.warningText ||
+            data.message ||
+            '该链接仅公开预览说明，暂未获取到可下载图片'
+          ElMessage.warning(noticeMessage)
+          return
+        }
+
+        if (backendImageUrls.length > 0) {
+          platform = data.platform || platform
+          thumbnailUrl = data.thumbnailUrl || data.imageUrl || backendImageUrls[0] || thumbnailUrl
+          extractedImageUrl = data.imageUrl || backendImageUrls[0] || thumbnailUrl
+          extractedImageUrls = backendImageUrls
+          extractedPages = backendPages
+          extractedPageCount =
+            Number(data.pageCount) ||
+            backendPages.length ||
+            backendImageUrls.length ||
+            (extractedImageUrl ? 1 : 0)
+          extractedIsMultiPage =
+            Boolean(data.isMultiPage) ||
+            extractedPageCount > 1 ||
+            extractedImageUrls.length > 1
+          extractedStatus = backendStatus
+
+          if (backendStatus !== 'success' || data.warningText) {
+            noticeMessage = data.warningText || data.message || null
+          }
+
+          console.log('✅ 后端验证成功，使用真实图片:', thumbnailUrl)
+        } else {
+          const errorMsg = data.message || '无法获取真实图片'
+          console.warn('⚠️ 后端响应未返回有效图片:', errorMsg)
+
+          if (platform === '818ps' && thumbnailUrl.includes('img.818ps.com')) {
+            warningMessage = '⚠️ 后端无法验证图片: ' + errorMsg + '，使用预测的URL'
+          } else {
+            thumbnailUrl = `https://picsum.photos/seed/${platform}-${Date.now()}/400/300`
+            warningMessage = '⚠️ ' + errorMsg + '，已使用占位图'
+          }
+        }
       } else {
         // 后端返回错误，使用占位图作为降级方案
         const errorMsg = data.message || '无法获取真实图片'
@@ -671,6 +711,9 @@ const handleParse = async () => {
         store.commit('SET_ERROR', null)
       }, 3000)
     }
+    if (noticeMessage) {
+      ElMessage.warning(noticeMessage)
+    }
 
     console.log('🎯 最终使用的图片URL:', thumbnailUrl)
 
@@ -695,7 +738,8 @@ const handleParse = async () => {
       imageUrls: normalizedImageUrls,
       pages: normalizedPages,
       pageCount: normalizedPageCount,
-      isMultiPage: normalizedIsMultiPage
+      isMultiPage: normalizedIsMultiPage,
+      status: extractedStatus
     })
 
     inputUrl.value = ''

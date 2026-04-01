@@ -10,6 +10,7 @@ const qs = require("querystring");
 const { extractViaThirdPartyAPIWithCache } = require("./thirdPartyApiGateway");
 const { extract818ps } = require("./extractors/818ps");
 const { extractGaoding } = require("./extractors/gaoding");
+const { extractHuaban } = require("./extractors/huaban");
 const {
   scrapeWithBrowser,
   scrape818ps,
@@ -80,6 +81,18 @@ function isChuangkitTarget(url, platform) {
     String(url || "").includes("chuangkit.com") ||
     platform === "Chuangkit" ||
     platform === "创客贴"
+  );
+}
+
+function isHuabanTarget(url, platform) {
+  const normalizedUrl = String(url || "").toLowerCase();
+  const normalizedPlatform = String(platform || "").toLowerCase();
+
+  return (
+    normalizedPlatform === "huaban" ||
+    normalizedUrl.includes("huaban.com") ||
+    normalizedUrl.includes("api.huaban.com") ||
+    normalizedUrl.includes("huabanimg.com")
   );
 }
 
@@ -1485,6 +1498,37 @@ async function extractGaodingImage(url) {
   }
 }
 
+async function extractHuabanImage(url) {
+  try {
+    const result = await extractHuaban(url, {
+      timeout: 15000,
+    });
+
+    if (
+      result &&
+      (result.imageUrl ||
+        result.status === "preview_image" ||
+        result.status === "preview_only")
+    ) {
+      console.log("Huaban extractor hit:", {
+        source: result.source,
+        status: result.status || "success",
+        pageCount: result.pageCount || 0,
+      });
+      return result;
+    }
+
+    throw new Error(
+      result && (result.error || result.message)
+        ? result.error || result.message
+        : "huaban_extract_failed"
+    );
+  } catch (error) {
+    console.error("Huaban extraction failed:", error.message);
+    throw error;
+  }
+}
+
 async function extractImage(url, platform) {
   console.log("\n=".repeat(60));
   console.log("🚀 开始提取图片");
@@ -1492,16 +1536,20 @@ async function extractImage(url, platform) {
   console.log(`   链接: ${url.substring(0, 100)}`);
   console.log("=".repeat(60));
   const shouldPreferLocalChuangkit = isChuangkitTarget(url, platform);
+  const shouldUseHuabanLocalOnly = isHuabanTarget(url, platform);
   let thirdPartyFallback = null;
 
   try {
     // ========== 阶段 1: 优先使用第三方 API 网关（命中率 80%+）==========
     console.log("\n📡 阶段 1: 尝试第三方 API 网关...");
-    try {
-      const thirdPartyResult = await extractViaThirdPartyAPIWithCache(
-        url,
-        platform
-      );
+    if (shouldUseHuabanLocalOnly) {
+      console.log("\nℹ️ 花瓣使用官方公开接口，跳过第三方 API 网关...");
+    } else {
+      try {
+        const thirdPartyResult = await extractViaThirdPartyAPIWithCache(
+          url,
+          platform
+        );
 
       if (
         thirdPartyResult &&
@@ -1550,6 +1598,8 @@ async function extractImage(url, platform) {
 
     // ========== 阶段 2: 本地平台特定提取（作为补充）==========
     console.log("\n🔍 阶段 2: 尝试本地平台特定提取（仅作补充）...");
+    }
+
     let result = null;
 
     try {
@@ -1568,6 +1618,8 @@ async function extractImage(url, platform) {
         result = await extractGaodingImage(url);
       } else if (platform === "Canva" && url.includes("canva")) {
         result = await extractCanvaImage(url);
+      } else if (isHuabanTarget(url, platform)) {
+        result = await extractHuabanImage(url);
       } else if (platform === "抖音" && url.includes("douyin")) {
         result = await extractDouyinImage(url);
       } else if (
@@ -1583,7 +1635,12 @@ async function extractImage(url, platform) {
         result = await extractChuangkitImageEnhanced(url);
       }
 
-      if (result && result.imageUrl) {
+      if (
+        result &&
+        (result.imageUrl ||
+          result.status === "preview_image" ||
+          result.status === "preview_only")
+      ) {
         console.log("\n✅ 【成功】本地提取返回结果\n");
         return result;
       }
@@ -1617,6 +1674,7 @@ module.exports = {
   extractImage,
   extract818psImage,
   extractGaodingImage,
+  extractHuabanImage,
   extractCanvaImage,
   extractDouyinImage,
   extractXiaohongshuImage,

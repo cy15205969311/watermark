@@ -437,6 +437,71 @@ node test-gaoding.js
 - 第三方平台的页面结构经常变化，某些链接可能需要后续适配。
 - 本项目会保存解析记录到数据库，也会把本地上传图片保存到 `server/uploads/`。
 
+## 2026-04 开发补充
+
+### 花瓣（Huaban）链路说明
+
+- 已支持识别 `huaban.com`、`api.huaban.com`、`huabanimg.com` 相关链接。
+- 花瓣提取器优先走公开 API，不再依赖第三方网关。
+- 对于单个 `pin` 链接，若公开接口只能返回带水印预览图，也会按可展示结果返回，不再强制判定为失败。
+- 返回状态新增：
+  - `success`：拿到可直接使用的图片地址
+  - `preview_image`：拿到可展示/可下载的公开预览图，可能带平台水印
+  - `preview_only`：仅确认目标存在公开预览说明，但没有拿到可直接展示的图片地址
+  - `processing` / `expired`：保留原有状态语义
+
+### 花瓣图片代理
+
+- 新增接口：`GET /api/proxy-image?url=<image-url>`
+- 目前该接口用于代理 `*.huabanimg.com` 图片请求，服务端会自动补齐花瓣所需的 `Referer` / `Origin`，解决前端直接预览时被防盗链拦截的问题。
+- 前端历史记录、查看结果弹窗、缩略图和下载入口，在命中花瓣图片时会自动切换到该代理地址。
+- 如果后续要扩展到其他有防盗链的平台，可在 `server/index.js` 中继续扩展 `IMAGE_PROXY_ALLOWED_HOSTS`。
+
+### 数据库兼容说明
+
+- `parse_records.status` 现在建议使用 `VARCHAR(32)`，以支持 `preview_image` 和 `preview_only`。
+- 服务启动时会自动检查并补齐以下字段或兼容调整：
+  - `image_urls_json`
+  - `pages_json`
+  - `page_count`
+  - `is_multi_page`
+  - `status` 列类型从旧 `ENUM` 自动调整为 `VARCHAR(32)`
+- 如果需要手动迁移，可执行：
+
+```bash
+mysql -u root -p < database/update-status-field.sql
+```
+
+### 本次开发涉及的核心文件
+
+- 前端入口：`client/src/App.vue`
+- 前端状态归一化：`client/src/store/index.js`
+- 前端花瓣图片代理转换：`client/src/utils/imageProxy.js`
+- 花瓣提取器：`server/extractors/huaban.js`
+- 提取总入口：`server/imageExtractor.js`
+- API 与图片代理：`server/index.js`
+- 平台识别补充：`server/controllers/imageController.js`
+
+### 联调与验证
+
+建议在提交前至少执行：
+
+```bash
+cd server
+node --check index.js
+node --check imageExtractor.js
+node --check extractors/huaban.js
+
+cd ../client
+npm run build
+```
+
+### 调试建议
+
+- 如果日志里已经看到 `Huaban extractor hit` 且状态是 `preview_image`，但浏览器仍显示“图片加载失败”，优先检查是否已经重启后端，使 `/api/proxy-image` 生效。
+- 如果历史记录里仍是旧的直链缩略图，刷新前端页面后会按最新逻辑重新走代理地址显示。
+- 对于花瓣素材，当前目标是“能展示/能下载公开预览图即可”；如果平台只公开带水印预览图，这是预期行为，不再视为异常。
+
 ## License
 
 MIT

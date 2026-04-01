@@ -10,8 +10,8 @@
         <a :href="record.originalUrl" target="_blank" class="url-link">
           {{ record.originalUrl }}
         </a>
-        <el-tag :type="record.status === 'success' ? 'success' : 'info'" size="small">
-          {{ record.status === 'success' ? '成功' : '已过期' }}
+        <el-tag :type="statusMeta.type" size="small">
+          {{ statusMeta.label }}
         </el-tag>
       </div>
       <span class="timestamp">{{ formatTime(record.timestamp) }}</span>
@@ -23,7 +23,8 @@
         <div class="expired-badge">已过期</div>
         <img :src="record.thumbnailUrl" alt="Thumbnail" class="thumbnail blurred" />
       </div>
-      <img v-else :src="record.thumbnailUrl" alt="Preview" class="thumbnail" />
+      <img v-else-if="record.thumbnailUrl" :src="record.thumbnailUrl" alt="Preview" class="thumbnail" />
+      <div v-else class="thumbnail-empty">暂无预览图</div>
     </div>
 
     <!-- 操作按钮 -->
@@ -36,7 +37,7 @@
           查看结果
         </el-button>
 
-        <el-button v-if="!isExpired" type="primary" plain size="small" @click="$emit('open-download', record)">
+        <el-button v-if="canDownload" type="primary" plain size="small" @click="$emit('open-download', record)">
           <el-icon>
             <Download />
           </el-icon>
@@ -56,6 +57,9 @@
           <Clock />
         </el-icon>
         下载已过期，请重新解析下载
+      </el-tag>
+      <el-tag v-else-if="record.status === 'preview_only'" type="warning" size="small" effect="plain">
+        暂未获取到可下载图片
       </el-tag>
     </div>
   </el-card>
@@ -83,6 +87,30 @@ const props = defineProps({
 defineEmits(['update:selected', 'view-result', 'open-download'])
 
 const isExpired = computed(() => props.record.status === 'expired')
+const canDownload = computed(() => {
+  if (isExpired.value) return false
+
+  return Boolean(
+    (Array.isArray(props.record.imageUrls) && props.record.imageUrls.length > 0) ||
+    props.record.imageUrl ||
+    props.record.thumbnailUrl
+  )
+})
+const statusMeta = computed(() => {
+  switch (props.record.status) {
+    case 'preview_image':
+      return { type: 'warning', label: '预览图' }
+    case 'preview_only':
+      return { type: 'info', label: '仅提示' }
+    case 'processing':
+      return { type: 'info', label: '处理中' }
+    case 'expired':
+      return { type: 'danger', label: '已过期' }
+    case 'success':
+    default:
+      return { type: 'success', label: '成功' }
+  }
+})
 
 const formatTime = (timestamp) => {
   if (!timestamp) return ''
@@ -194,6 +222,16 @@ const handleDelete = async () => {
   height: 200px;
   object-fit: cover;
   display: block;
+}
+
+.thumbnail-empty {
+  height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #94a3b8;
+  font-size: 14px;
+  background: #f8fafc;
 }
 
 .expired-overlay {

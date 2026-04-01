@@ -27,7 +27,11 @@ function detectPlatform(url) {
     return '818ps';
   }
 
-  if (urlLower.includes('huaban.com')) {
+  if (
+    urlLower.includes('huaban.com') ||
+    urlLower.includes('api.huaban.com') ||
+    urlLower.includes('huabanimg.com')
+  ) {
     return 'huaban';
   }
 

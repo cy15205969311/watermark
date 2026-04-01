@@ -1,5 +1,6 @@
 import { createStore } from "vuex";
 import axios from "axios";
+import { toClientImageUrl } from "../utils/imageProxy";
 
 const api = axios.create({
   baseURL: "/api",
@@ -48,6 +49,21 @@ function isBlockedPreviewAssetUrl(value) {
   return false;
 }
 
+function normalizeRecordStatus(status) {
+  const normalized =
+    typeof status === "string" ? status.trim().toLowerCase() : "";
+
+  if (
+    ["success", "expired", "processing", "preview_image", "preview_only"].includes(
+      normalized
+    )
+  ) {
+    return normalized;
+  }
+
+  return "success";
+}
+
 function normalizeRecord(record = {}) {
   const imageUrls = [];
   const seen = new Set();
@@ -62,8 +78,9 @@ function normalizeRecord(record = {}) {
       return;
     }
 
-    seen.add(normalized);
-    imageUrls.push(normalized);
+    const clientUrl = toClientImageUrl(normalized);
+    seen.add(clientUrl);
+    imageUrls.push(clientUrl);
   };
 
   (record.imageUrls || []).forEach(addUrl);
@@ -78,7 +95,7 @@ function normalizeRecord(record = {}) {
       page: Number(page && page.page) || index + 1,
       imageUrl:
         typeof (page && page.imageUrl) === "string"
-          ? page.imageUrl.trim()
+          ? toClientImageUrl(page.imageUrl.trim())
           : "",
     }))
     .filter((page) => Boolean(page.imageUrl) && !isBlockedPreviewAssetUrl(page.imageUrl));
@@ -89,14 +106,14 @@ function normalizeRecord(record = {}) {
 
   const preferredThumbnailUrl =
     !isBlockedPreviewAssetUrl(record.thumbnailUrl)
-      ? record.thumbnailUrl
+      ? toClientImageUrl(record.thumbnailUrl)
       : !isBlockedPreviewAssetUrl(record.thumbnail_url)
-        ? record.thumbnail_url
+        ? toClientImageUrl(record.thumbnail_url)
         : pages[0]?.imageUrl || imageUrls[0] || "";
 
   const preferredImageUrl =
     !isBlockedPreviewAssetUrl(record.imageUrl)
-      ? record.imageUrl
+      ? toClientImageUrl(record.imageUrl)
       : pages[0]?.imageUrl || imageUrls[0] || "";
 
   if (!pages.length) {
@@ -132,7 +149,7 @@ function normalizeRecord(record = {}) {
     pageCount,
     isMultiPage,
     textLayers: record.textLayers || record.text_layers || [],
-    status: record.status || "success",
+    status: normalizeRecordStatus(record.status),
     timestamp: record.timestamp || record.created_at || new Date().toISOString(),
   };
 }
@@ -183,7 +200,7 @@ export default createStore({
 
     async parseUrl(
       { commit },
-      { url, platform, thumbnailUrl, imageUrl, imageUrls, pages, pageCount, isMultiPage }
+      { url, platform, thumbnailUrl, imageUrl, imageUrls, pages, pageCount, isMultiPage, status }
     ) {
       try {
         commit("SET_LOADING", true);
@@ -198,7 +215,7 @@ export default createStore({
           pages,
           pageCount,
           isMultiPage,
-          status: "success",
+          status: normalizeRecordStatus(status),
         });
 
         if (data.success) {
