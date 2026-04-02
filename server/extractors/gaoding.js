@@ -579,6 +579,22 @@ function extractArrayObjectUrls(text, fieldName) {
   return dedupeUrls(urls);
 }
 
+function extractDesignInfoUrlFromHtml(htmlContent) {
+  const decodedText = decodeHtmlText(htmlContent || "");
+  if (!decodedText) {
+    return null;
+  }
+
+  const pattern =
+    /"design_info"\s*:\s*\{\s*"url"\s*:\s*(null|"(?<url>https?:\/\/[^"]+)")/i;
+  const match = decodedText.match(pattern);
+  if (!match) {
+    return null;
+  }
+
+  return decodeHtmlText((match.groups && match.groups.url) || "").trim() || null;
+}
+
 function extractPreviewBundleFromHtml(htmlContent) {
   const decodedText = decodeHtmlText(htmlContent || "");
   if (!decodedText) {
@@ -608,6 +624,114 @@ function extractPreviewBundleFromHtml(htmlContent) {
   });
 
   return dedupeEntries(bundleEntries);
+}
+
+function extractPagePreviewUrlsFromDesignData(data) {
+  const pages = Array.isArray(data && data.pages) ? data.pages : [];
+  if (!pages.length) {
+    return [];
+  }
+
+  const pageUrls = [];
+
+  pages.forEach((page, pageIndex) => {
+    const candidates = [];
+    const addCandidate = (rawUrl, hint, bonus = 0) => {
+      const normalized = normalizeCandidateUrl(rawUrl);
+      if (!normalized) {
+        return;
+      }
+
+      candidates.push({
+        url: normalized,
+        score:
+          scoreCandidate(
+            normalized,
+            `design_json.pages[${pageIndex}].${hint}`,
+            "detail"
+          ) + bonus,
+      });
+    };
+
+    addCandidate(page && page.preview_info && page.preview_info.url, "preview_info.url", 420);
+    addCandidate(page && page.previewInfo && page.previewInfo.url, "previewInfo.url", 420);
+    addCandidate(
+      page && page.source_preview_info && page.source_preview_info.url,
+      "source_preview_info.url",
+      460
+    );
+    addCandidate(
+      page && page.sourcePreviewInfo && page.sourcePreviewInfo.url,
+      "sourcePreviewInfo.url",
+      460
+    );
+    addCandidate(page && page.thumbnail && page.thumbnail.url, "thumbnail.url", 260);
+    addCandidate(page && page.cover && page.cover.url, "cover.url", 220);
+    addCandidate(page && page.poster && page.poster.url, "poster.url", 220);
+
+    const elements = Array.isArray(page && page.elements) ? page.elements : [];
+    elements.forEach((element, elementIndex) => {
+      const hintPrefix = `elements[${elementIndex}]`;
+      const elementType = String(element && element.type || "").toLowerCase();
+
+      if (elementType === "layout") {
+        addCandidate(
+          element && element.thumbnail && element.thumbnail.url,
+          `${hintPrefix}.thumbnail.url`,
+          360
+        );
+        addCandidate(
+          element &&
+            element.background &&
+            element.background.image &&
+            element.background.image.url,
+          `${hintPrefix}.background.image.url`,
+          180
+        );
+      }
+
+      addCandidate(element && element.preview_info && element.preview_info.url, `${hintPrefix}.preview_info.url`, 260);
+      addCandidate(element && element.previewInfo && element.previewInfo.url, `${hintPrefix}.previewInfo.url`, 260);
+      addCandidate(element && element.thumbnail && element.thumbnail.url, `${hintPrefix}.thumbnail.url`, 220);
+      addCandidate(element && element.cover && element.cover.url, `${hintPrefix}.cover.url`, 180);
+    });
+
+    const bestCandidate = candidates.sort((left, right) => right.score - left.score)[0];
+    if (bestCandidate && bestCandidate.url) {
+      pageUrls.push(bestCandidate.url);
+    }
+  });
+
+  return dedupeUrls(pageUrls);
+}
+
+async function fetchDesignJsonPageUrls(designInfoUrl, options = {}) {
+  if (!designInfoUrl) {
+    return [];
+  }
+
+  try {
+    const response = await axios.get(designInfoUrl, {
+      headers: {
+        ...GAODING_HEADERS,
+        Accept: "application/json,text/plain,*/*",
+      },
+      timeout: Number(options.timeout) || STATIC_TIMEOUT,
+      maxRedirects: 5,
+      validateStatus: () => true,
+    });
+
+    if (response.status !== 200) {
+      return [];
+    }
+
+    const data =
+      typeof response.data === "string" ? JSON.parse(response.data) : response.data;
+
+    return extractPagePreviewUrlsFromDesignData(data);
+  } catch {
+    return [];
+  }
 }
 
 function candidateGroupKey(hint) {
@@ -980,6 +1104,90 @@ function buildResult(imageUrls, originalUrl, source, method, linkType, score = 0
   };
 }
 
+function getResultPageCount(result) {
+  if (!result) {
+    return 0;
+  }
+
+  const explicitPageCount = Number(result.pageCount);
+  if (Number.isFinite(explicitPageCount) && explicitPageCount > 0) {
+    return explicitPageCount;
+  }
+
+  return dedupeUrls([
+    ...(Array.isArray(result.imageUrls) ? result.imageUrls : []),
+    ...(Array.isArray(result.images) ? result.images : []),
+    result.imageUrl,
+  ]).length;
+}
+
+function shouldAttemptDynamicAfterStatic(staticResult, linkType) {
+  if (!staticResult || !staticResult.success || !staticResult.imageUrl) {
+    return true;
+  }
+
+  if (getResultPageCount(staticResult) > 1) {
+    return false;
+  }
+
+  if (!["share", "detail", "editor", "creation"].includes(linkType)) {
+    return false;
+  }
+
+  const source = String(staticResult.source || "").toLowerCase();
+  return (
+    !source ||
+    source.includes("candidate") ||
+    source.includes("meta") ||
+    source.includes("cover") ||
+    source.includes("preview") ||
+    Number(staticResult.score || 0) < 1600
+  );
+}
+
+function selectPreferredResult(primaryResult, secondaryResult, linkType) {
+  if (!primaryResult) {
+    return secondaryResult || null;
+  }
+  if (!secondaryResult) {
+    return primaryResult;
+  }
+
+  const scoreResult = (result) => {
+    const pageCount = getResultPageCount(result);
+    const source = String(result.source || "").toLowerCase();
+    let score = Number(result.score || 0);
+
+    if (pageCount > 1) {
+      score += 10000 + pageCount * 120;
+    }
+
+    if (source.includes("multi-page") || source.includes("preview-bundle")) {
+      score += 900;
+    }
+
+    if (source.includes("dynamic")) {
+      score += ["share", "detail", "editor", "creation"].includes(linkType)
+        ? 220
+        : 60;
+    }
+
+    if (source.includes("design-json")) {
+      score += 320;
+    }
+
+    if (source.includes("candidate") || source === "meta") {
+      score -= 120;
+    }
+
+    return score;
+  };
+
+  return scoreResult(secondaryResult) > scoreResult(primaryResult)
+    ? secondaryResult
+    : primaryResult;
+}
+
 function looksLikeAntiBotPage(htmlContent) {
   const lowered = String(htmlContent || "").toLowerCase();
   const antiBotTexts = [
@@ -1092,12 +1300,33 @@ async function staticScraping(url, linkType, options = {}) {
       return null;
     }
 
-    return analyzeHtmlContent(
-      typeof response.data === "string" ? response.data : String(response.data),
+    const htmlContent =
+      typeof response.data === "string" ? response.data : String(response.data);
+    const htmlResult = await analyzeHtmlContent(
+      htmlContent,
       url,
       linkType,
       "static"
     );
+    if (getResultPageCount(htmlResult) > 1) {
+      return htmlResult;
+    }
+
+    const designInfoUrl = extractDesignInfoUrlFromHtml(htmlContent);
+    const designJsonPageUrls = await fetchDesignJsonPageUrls(designInfoUrl, options);
+    const designJsonResult =
+      designJsonPageUrls.length >= 2
+        ? buildResult(
+            designJsonPageUrls,
+            url,
+            "design-json-pages",
+            "static_design_json_pages",
+            linkType,
+            1500
+          )
+        : null;
+
+    return selectPreferredResult(htmlResult, designJsonResult, linkType);
   } catch {
     return null;
   }
@@ -1124,6 +1353,71 @@ async function dynamicScraping(url, linkType, options = {}) {
 
     browser = await puppeteer.launch(launchOptions);
     page = await browser.newPage();
+    const responseTasks = [];
+    const networkStructuredEntries = [];
+    const networkLooseEntries = [];
+    const networkPreviewBundleEntries = [];
+
+    page.on("response", (response) => {
+      responseTasks.push(
+        (async () => {
+          const resourceType = response.request().resourceType();
+          const contentType = String(
+            (response.headers() && response.headers()["content-type"]) || ""
+          ).toLowerCase();
+          const contentLength = Number(
+            (response.headers() && response.headers()["content-length"]) || 0
+          );
+
+          if (contentLength && contentLength > 2 * 1024 * 1024) {
+            return;
+          }
+
+          const shouldReadText =
+            ["document", "xhr", "fetch"].includes(resourceType) ||
+            contentType.includes("json") ||
+            contentType.includes("html") ||
+            contentType.includes("text") ||
+            contentType.includes("javascript");
+
+          if (!shouldReadText) {
+            return;
+          }
+
+          const payloadText = await response.text().catch(() => "");
+          if (!payloadText || payloadText.length > 2 * 1024 * 1024) {
+            return;
+          }
+
+          const hintRoot = `network.${resourceType}`;
+          const previewBundleEntries = extractPreviewBundleFromHtml(payloadText).map(
+            ([imageUrl, hint]) => [imageUrl, hint.replace(/^html/i, hintRoot)]
+          );
+
+          if (previewBundleEntries.length) {
+            networkPreviewBundleEntries.push(...previewBundleEntries);
+          }
+
+          const trimmedPayload = decodeHtmlText(payloadText).trim();
+          if (trimmedPayload && ["{", "["].includes(trimmedPayload[0])) {
+            try {
+              const data = JSON.parse(trimmedPayload);
+              networkStructuredEntries.push(
+                ...extractCandidatesFromData(data, hintRoot)
+              );
+            } catch {
+              // Ignore non-JSON payloads.
+            }
+          }
+
+          networkLooseEntries.push(
+            ...extractContextualUrlsFromText(payloadText).map(
+              ([imageUrl], index) => [imageUrl, `${hintRoot}.text[${index}]`]
+            )
+          );
+        })().catch(() => {})
+      );
+    });
 
     await page.setViewport({ width: 1600, height: 1200 });
     await page.setUserAgent(GAODING_HEADERS["User-Agent"]);
@@ -1142,6 +1436,7 @@ async function dynamicScraping(url, linkType, options = {}) {
       window.scrollBy(0, Math.max(window.innerHeight, 900));
     });
     await page.waitForTimeout(1500);
+    await Promise.allSettled(responseTasks);
 
     const renderedHtml = await page.content();
     const renderedResult = await analyzeHtmlContent(
@@ -1150,9 +1445,6 @@ async function dynamicScraping(url, linkType, options = {}) {
       linkType,
       "dynamic"
     );
-    if (renderedResult) {
-      return renderedResult;
-    }
 
     const visibleUrls = await page.evaluate(() => {
       const seen = new Set();
@@ -1227,8 +1519,57 @@ async function dynamicScraping(url, linkType, options = {}) {
       `dynamic-visible[${index}]`,
     ]);
 
+    let supplementalResult = null;
+    const structuredNetworkEntries = dedupeEntries(networkStructuredEntries);
+    const previewBundleNetworkEntries = dedupeEntries(networkPreviewBundleEntries);
+    const looseNetworkEntries = dedupeEntries(networkLooseEntries);
+
+    if (previewBundleNetworkEntries.length) {
+      const validUrls = await validateUrlsInOrder(
+        previewBundleNetworkEntries.map(([imageUrl]) => imageUrl)
+      );
+      if (validUrls.length >= 2) {
+        supplementalResult = buildResult(
+          validUrls,
+          url,
+          "dynamic-network-preview-bundle",
+          "browser_network_preview_bundle",
+          linkType,
+          1820
+        );
+      }
+    }
+
+    if (!supplementalResult && structuredNetworkEntries.length) {
+      const groupedEntries = selectBestMultiPageGroup(structuredNetworkEntries);
+      if (groupedEntries.length) {
+        const validUrls = await validateUrlsInOrder(
+          groupedEntries.map(([imageUrl]) => imageUrl)
+        );
+        if (validUrls.length >= 2) {
+          supplementalResult = buildResult(
+            validUrls,
+            url,
+            "dynamic-network-multi-page",
+            "browser_network_group",
+            linkType,
+            1720
+          );
+        }
+      }
+    }
+
+    const preferredDynamicResult = selectPreferredResult(
+      renderedResult,
+      supplementalResult,
+      linkType
+    );
+    if (preferredDynamicResult) {
+      return preferredDynamicResult;
+    }
+
     const bestVisibleUrl = await pickBestSingleCandidate(
-      visibleEntries,
+      structuredNetworkEntries.concat(looseNetworkEntries, visibleEntries),
       linkType,
       8
     );
@@ -1266,14 +1607,17 @@ async function extractGaoding(url, options = {}) {
 
   try {
     const staticResult = await staticScraping(normalizedUrl, linkType, options);
-    if (staticResult) {
+    if (staticResult && !shouldAttemptDynamicAfterStatic(staticResult, linkType)) {
       return staticResult;
     }
 
     if (linkType === "listing") {
-      return buildFailureResult("gaoding_listing_not_supported", normalizedUrl, {
-        linkType,
-      });
+      return (
+        staticResult ||
+        buildFailureResult("gaoding_listing_not_supported", normalizedUrl, {
+          linkType,
+        })
+      );
     }
 
     const dynamicResult = await dynamicScraping(
@@ -1281,8 +1625,13 @@ async function extractGaoding(url, options = {}) {
       linkType,
       options
     );
-    if (dynamicResult) {
-      return dynamicResult;
+    const preferredResult = selectPreferredResult(
+      staticResult,
+      dynamicResult,
+      linkType
+    );
+    if (preferredResult) {
+      return preferredResult;
     }
 
     return buildFailureResult("gaoding_image_not_found", normalizedUrl, {
@@ -1302,9 +1651,13 @@ module.exports = {
     stripGaodingOssProcess,
     isGaodingDesignCandidate,
     extractPreviewBundleFromHtml,
+    extractDesignInfoUrlFromHtml,
+    extractPagePreviewUrlsFromDesignData,
     extractCandidatesFromData,
     selectBestMultiPageGroup,
     scoreCandidate,
     buildResult,
+    shouldAttemptDynamicAfterStatic,
+    selectPreferredResult,
   },
 };

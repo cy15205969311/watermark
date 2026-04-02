@@ -97,4 +97,80 @@ test("selectBestMultiPageGroup prefers page-like JSON paths", () => {
   );
 });
 
+test("extractDesignInfoUrlFromHtml reads design json url", () => {
+  const htmlContent = `
+    <script>
+      {&quot;design_info&quot;:{&quot;url&quot;:&quot;https://gdesign-dam-hw.dancf.com/123/design-json/abc.json?auth_key=test&quot;}}
+    </script>
+  `;
+
+  assert.strictEqual(
+    __internals.extractDesignInfoUrlFromHtml(htmlContent),
+    "https://gdesign-dam-hw.dancf.com/123/design-json/abc.json?auth_key=test"
+  );
+});
+
+test("extractPagePreviewUrlsFromDesignData returns one preview per page", () => {
+  const data = {
+    pages: [
+      {
+        elements: [
+          {
+            type: "layout",
+            thumbnail: {
+              url: "https://gdesign-dam-hw.dancf.com/work/page-1-thumb.png",
+            },
+          },
+        ],
+      },
+      {
+        preview_info: {
+          url: "https://gdesign-dam-hw.dancf.com/work/page-2-preview.jpeg",
+        },
+      },
+      {
+        thumbnail: {
+          url: "https://gdesign-dam-hw.dancf.com/work/page-3-thumb.png",
+        },
+      },
+    ],
+  };
+
+  assert.deepStrictEqual(__internals.extractPagePreviewUrlsFromDesignData(data), [
+    "https://gdesign-dam-hw.dancf.com/work/page-1-thumb.png",
+    "https://gdesign-dam-hw.dancf.com/work/page-2-preview.jpeg",
+    "https://gdesign-dam-hw.dancf.com/work/page-3-thumb.png",
+  ]);
+});
+
+test("shouldAttemptDynamicAfterStatic keeps probing share links with single static image", () => {
+  assert.strictEqual(
+    __internals.shouldAttemptDynamicAfterStatic(
+      {
+        success: true,
+        imageUrl: "https://gdesign-dam-hw.dancf.com/work/preview/page-1.jpeg",
+        source: "static-candidate",
+        pageCount: 1,
+        score: 700,
+      },
+      "share"
+    ),
+    true
+  );
+
+  assert.strictEqual(
+    __internals.shouldAttemptDynamicAfterStatic(
+      {
+        success: true,
+        imageUrl: "https://gdesign-dam-hw.dancf.com/work/preview/page-1.jpeg",
+        source: "html-preview-bundle",
+        pageCount: 4,
+        score: 1900,
+      },
+      "share"
+    ),
+    false
+  );
+});
+
 console.log("Gaoding helper tests passed.");

@@ -150,6 +150,12 @@ PORT=3000
 PUPPETEER_EXECUTABLE_PATH=C:\Program Files\Google\Chrome\Application\chrome.exe
 ```
 
+补充说明：
+
+- `server/.env` 已被 `.gitignore` 忽略，迁移到新目录或新机器后需要手动复制/重新创建。
+- 服务启动时会按顺序尝试加载：`.env.production`、`.env`、`.env.local`、`.env.<NODE_ENV>`、`.env.<NODE_ENV>.local`。
+- 已经存在的系统环境变量不会被覆盖；本地开发建议至少保留一个可用的 `server/.env`。
+
 ### 4. 安装依赖
 
 后端：
@@ -336,6 +342,8 @@ npm run dev
 - 支持 `gaoding.com` / `gaoding.cn` 分享链接识别
 - 自动清理分享文案 fragment，例如 `#我分享了...`
 - 优先从分享页 HTML 中提取 `source_preview_info`、`preview_info` 和 `extends_previews`
+- 当分享页 HTML 只有单张封面图时，会继续尝试动态页面与网络响应分析，避免多页套图被误判为单图
+- 当分享页存在 `design_info.url` 时，会继续拉取设计稿 JSON，并从每一页中挑选最合适的预览图作为多页兜底结果
 - 支持多页套图返回，统一输出 `imageUrls/pages/pageCount`
 - 对稿定 / `dancf.com` 图片链接自动移除 `x-oss-process`，避免 OSS 处理参数导致资源失效
 
@@ -387,6 +395,7 @@ node test-gaoding.js
 - MySQL 服务是否已启动
 - `server/.env` 中的数据库账号密码是否正确
 - 数据库 `watermark_remover` 是否已创建
+- 如果项目刚移动过目录，确认新的 `server/` 目录下仍然存在 `.env`；缺失时会导致数据库用户名/密码为空
 
 ### 2. 前端打不开图片或列表出现空白缩略图
 
@@ -407,12 +416,14 @@ node test-gaoding.js
 - 输入链接是否为公开分享链接，而不是需要登录的编辑页
 - 链接中的 `#我分享了...` 之类 fragment 是否已被清理
 - 分享页 HTML 中是否仍存在 `source_preview_info`、`preview_info`、`extends_previews`
+- 分享页是否提供了 `design_info.url`，以及对应设计稿 JSON 是否仍可访问
 - 图片直链中的 `auth_key` 是否已经过期
 
 说明：
 
-- 当前版本优先走稿定分享页静态提取，命中时会直接返回整套 `pages`
-- 如果分享页结构变化，可能会回退到单图候选或动态兜底
+- 当前版本会依次尝试：分享页 HTML 多图信息 -> 设计稿 JSON 多页兜底 -> 动态页面与网络响应分析
+- 如果静态页只拿到 1 张候选图，提取器不会立刻结束，而是继续尝试动态抓取以恢复套图结果
+- 如果分享页结构、设计稿 JSON 和动态请求都发生变化，最终才会回退到单图候选
 
 ### 4. Puppeteer 启动失败
 

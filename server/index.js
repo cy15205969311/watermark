@@ -18,12 +18,53 @@ const express = require("express");
 const mysql = require("mysql2/promise");
 const cors = require("cors");
 const axios = require("axios");
-require("dotenv").config();
+const fs = require("fs");
+const path = require("path");
+const dotenv = require("dotenv");
 const { extractImage } = require("./imageExtractor");
 const {
   initDefaultPool,
   closeDefaultPool,
 } = require("./services/browser-pool");
+
+function loadServerEnvFiles() {
+  const protectedKeys = new Set(Object.keys(process.env));
+  const nodeEnv = String(process.env.NODE_ENV || "").trim();
+  const envFiles = [
+    ".env.production",
+    ".env",
+    ".env.local",
+    nodeEnv ? `.env.${nodeEnv}` : null,
+    nodeEnv ? `.env.${nodeEnv}.local` : null,
+  ].filter(Boolean);
+  const seen = new Set();
+  const loadedFiles = [];
+
+  for (const fileName of envFiles) {
+    if (seen.has(fileName)) {
+      continue;
+    }
+    seen.add(fileName);
+
+    const filePath = path.join(__dirname, fileName);
+    if (!fs.existsSync(filePath)) {
+      continue;
+    }
+
+    const parsed = dotenv.parse(fs.readFileSync(filePath));
+    for (const [key, value] of Object.entries(parsed)) {
+      if (protectedKeys.has(key)) {
+        continue;
+      }
+      process.env[key] = value;
+    }
+    loadedFiles.push(fileName);
+  }
+
+  return loadedFiles;
+}
+
+const loadedEnvFiles = loadServerEnvFiles();
 
 const app = express();
 let PORT = parseInt(process.env.PORT || 3000);
@@ -40,8 +81,6 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
 // 静态托管 uploads 目录（上传的图片将保存在这里）
-const path = require("path");
-const fs = require("fs");
 const uploadsDir = path.join(__dirname, "uploads");
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
@@ -395,11 +434,38 @@ app.use((req, res, next) => {
 });
 
 // 数据库连接池配置
+const dbConfig = {
+  host: String(process.env.DB_HOST || "localhost").trim(),
+  user: String(process.env.DB_USER || "").trim(),
+  password: String(process.env.DB_PASSWORD || ""),
+  database: String(process.env.DB_NAME || "watermark_remover").trim(),
+};
+const missingDbConfigKeys = Object.entries({
+  DB_HOST: dbConfig.host,
+  DB_USER: dbConfig.user,
+  DB_NAME: dbConfig.database,
+})
+  .filter(([, value]) => value === "")
+  .map(([key]) => key);
+
+if (loadedEnvFiles.length > 0) {
+  console.log(`Loaded env files: ${loadedEnvFiles.join(", ")}`);
+} else {
+  console.warn(
+    "No server env file found. Create server/.env or provide DB_* environment variables."
+  );
+}
+
+if (missingDbConfigKeys.length > 0) {
+  console.warn(
+    `Missing database env vars: ${missingDbConfigKeys.join(
+      ", "
+    )}. Update server/.env before starting the API.`
+  );
+}
+
 const pool = mysql.createPool({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
+  ...dbConfig,
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
