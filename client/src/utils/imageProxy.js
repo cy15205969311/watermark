@@ -1,7 +1,13 @@
-const IMAGE_PROXY_PATH = "/api/proxy-image";
+import { buildApiUrl } from "./api";
+
+const IMAGE_PROXY_PATH = buildApiUrl("/proxy-image");
+const IMAGE_PROXY_ROUTE_PATTERN = /(^https?:\/\/[^/]+)?\/api\/proxy-image(?:[/?#]|$)/i;
 
 function isProxyPath(url = "") {
-  return typeof url === "string" && url.startsWith(IMAGE_PROXY_PATH);
+  return (
+    typeof url === "string" &&
+    (url.startsWith(IMAGE_PROXY_PATH) || IMAGE_PROXY_ROUTE_PATTERN.test(url.trim()))
+  );
 }
 
 function getHostname(url = "") {

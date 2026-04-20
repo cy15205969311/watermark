@@ -1,9 +1,10 @@
 import { createStore } from "vuex";
 import axios from "axios";
+import { API_BASE_URL } from "../utils/api";
 import { toClientImageUrl } from "../utils/imageProxy";
 
 const api = axios.create({
-  baseURL: "/api",
+  baseURL: API_BASE_URL,
 });
 
 function parseJsonField(value, fallback = []) {

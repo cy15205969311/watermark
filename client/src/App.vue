@@ -245,6 +245,7 @@ import { ElMessageBox, ElMessage } from 'element-plus'
 import HistoryItem from './components/HistoryItem.vue'
 import PlatformIcons from './components/PlatformIcons.vue'
 import DownloadDialog from './components/DownloadDialog.vue'
+import { buildApiUrl } from './utils/api'
 
 const store = useStore()
 
@@ -608,7 +609,7 @@ const handleParse = async () => {
     let extractedStatus = 'success'
 
     try {
-      const response = await fetch('/api/extract-image', {
+      const response = await fetch(buildApiUrl('/extract-image'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: originalUrl, platform })
@@ -878,7 +879,7 @@ async function submitUpload() {
 
     // 根据选择的算法添加 query 参数
     const queryParam = `?method=${encodeURIComponent(selectedAlgorithm.value)}`
-    const resp = await fetch(`/api/upload-image${queryParam}`, { method: 'POST', body: fd })
+    const resp = await fetch(buildApiUrl(`/upload-image${queryParam}`), { method: 'POST', body: fd })
     const data = await resp.json()
 
     if (resp.ok && data.success && data.imageUrl) {

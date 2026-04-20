@@ -19,6 +19,7 @@ const mysql = require("mysql2/promise");
 const cors = require("cors");
 const axios = require("axios");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const dotenv = require("dotenv");
 const { extractImage } = require("./imageExtractor");
@@ -68,6 +69,37 @@ const loadedEnvFiles = loadServerEnvFiles();
 
 const app = express();
 let PORT = parseInt(process.env.PORT || 3000);
+const HOST = String(process.env.HOST || "0.0.0.0").trim() || "0.0.0.0";
+
+function getServerAccessUrls(host, port) {
+  const normalizedHost = String(host || "").trim();
+  if (
+    normalizedHost &&
+    normalizedHost !== "0.0.0.0" &&
+    normalizedHost !== "::"
+  ) {
+    const formattedHost =
+      normalizedHost.includes(":") && !normalizedHost.startsWith("[")
+        ? `[${normalizedHost}]`
+        : normalizedHost;
+    return [`http://${formattedHost}:${port}`];
+  }
+
+  const urls = new Set([`http://localhost:${port}`, `http://127.0.0.1:${port}`]);
+  const networkInterfaces = os.networkInterfaces();
+
+  Object.values(networkInterfaces).forEach((entries) => {
+    (entries || []).forEach((details) => {
+      if (!details || details.family !== "IPv4" || details.internal) {
+        return;
+      }
+
+      urls.add(`http://${details.address}:${port}`);
+    });
+  });
+
+  return Array.from(urls);
+}
 
 // 中间件 - 增强 CORS 配置
 app.use(
@@ -899,9 +931,24 @@ app.post("/api/extract-image", async (req, res) => {
 
 // 启动服务器，支持端口自动递增（解决 EADDRINUSE）
 function startServer(port) {
-  const server = app.listen(port, () => {
-    console.log(`\n🚀 服务器运行在 http://localhost:${port}`);
-    console.log(`📡 API 地址: http://localhost:${port}/api`);
+  const server = app.listen(port, HOST, () => {
+    const accessUrls = getServerAccessUrls(HOST, port);
+    const localUrls = accessUrls.filter(
+      (url) => url.includes("localhost") || url.includes("127.0.0.1")
+    );
+    const lanUrls = accessUrls.filter(
+      (url) => !url.includes("localhost") && !url.includes("127.0.0.1")
+    );
+
+    console.log(`\n🚀 服务器监听地址: ${HOST}:${port}`);
+    localUrls.forEach((url) => {
+      console.log(`🏠 本机访问: ${url}`);
+      console.log(`📡 本机 API: ${url}/api`);
+    });
+    lanUrls.forEach((url) => {
+      console.log(`🌐 局域网访问: ${url}`);
+      console.log(`📡 局域网 API: ${url}/api`);
+    });
     console.log(`\n✅ 服务已启动，等待请求...\n`);
   });
 
