@@ -83,18 +83,26 @@
 ├─ client/                    前端项目
 │  ├─ src/
 │  │  ├─ components/          页面组件
+│  │  ├─ services/            前端接口调用
 │  │  ├─ store/               Vuex 状态管理
+│  │  ├─ utils/               API 与图片代理工具
 │  │  └─ App.vue              主页面
+│  ├─ package.json
 │  └─ vite.config.js          前端开发代理配置
 ├─ server/                    后端项目
+│  ├─ controllers/            控制器
 │  ├─ extractors/             平台提取器
+│  ├─ routes/                 路由
 │  ├─ services/               浏览器与提取相关服务
 │  ├─ uploads/                本地上传与处理后的图片
-│  ├─ imageExtractor.js       链接提取总入口
+│  ├─ utils/                  浏览器与滚动工具
+│  ├─ imageExtractor.js       平台提取总入口
 │  ├─ index.js                Express 服务入口
 │  └─ watermarkRemoval.js     本地去水印逻辑
 ├─ database/
 │  └─ schema.sql              初始数据库结构
+├─ DOCS_INDEX.md              文档索引
+├─ PROJECT_ARCHITECTURE.md    架构文档
 └─ README.md
 ```
 
@@ -343,9 +351,10 @@ npm run dev
 - 自动清理分享文案 fragment，例如 `#我分享了...`
 - 优先从分享页 HTML 中提取 `source_preview_info`、`preview_info` 和 `extends_previews`
 - 当分享页 HTML 只有单张封面图时，会继续尝试动态页面与网络响应分析，避免多页套图被误判为单图
-- 当分享页存在 `design_info.url` 时，会继续拉取设计稿 JSON，并从每一页中挑选最合适的预览图作为多页兜底结果
+- 当分享页存在 `design_info.url` 时，会继续拉取设计稿 JSON，并兼容 `pages[]` / `layouts[]` 两类结构，挑选整页预览图作为兜底结果
 - 支持多页套图返回，统一输出 `imageUrls/pages/pageCount`
 - 对稿定 / `dancf.com` 图片链接自动移除 `x-oss-process`，避免 OSS 处理参数导致资源失效
+- 会过滤尺寸明显异常的局部元素小图，避免“提取成功但主图黑屏/细条图”的误判
 
 ### 本地去水印
 
@@ -379,12 +388,23 @@ node test-gaoding.js
 
 - 前端主界面：`client/src/App.vue`
 - 前端状态管理：`client/src/store/index.js`
+- 前端 API 地址工具：`client/src/utils/api.js`
+- 前端图片代理工具：`client/src/utils/imageProxy.js`
 - 后端 API：`server/index.js`
 - 链接提取总入口：`server/imageExtractor.js`
 - 稿定提取器：`server/extractors/gaoding.js`
 - 稿定本地验证：`server/test-gaoding.js`
 - 浏览器抓取：`server/services/browser.js`
+- 浏览器池：`server/services/browser-pool.js`
+- Puppeteer 启动参数工具：`server/utils/puppeteer-launch.js`
 - 本地去水印：`server/watermarkRemoval.js`
+
+### 文档入口
+
+- 文档索引：`DOCS_INDEX.md`
+- 架构文档：`PROJECT_ARCHITECTURE.md`
+- 平台提取总览：`PLATFORM_EXTRACTION_LOGIC_FOR_PYTHON.md`
+- 818ps 专项说明：`818PS_EXTRACTION_LOGIC.md`
 
 ## 常见问题
 
@@ -423,6 +443,7 @@ node test-gaoding.js
 
 - 当前版本会依次尝试：分享页 HTML 多图信息 -> 设计稿 JSON 多页兜底 -> 动态页面与网络响应分析
 - 如果静态页只拿到 1 张候选图，提取器不会立刻结束，而是继续尝试动态抓取以恢复套图结果
+- 如果日志里显示成功但页面预览是黑块、细长条或极小 PNG，优先排查是否命中了局部元素图；当前版本已经对这类非整页资源做了额外过滤
 - 如果分享页结构、设计稿 JSON 和动态请求都发生变化，最终才会回退到单图候选
 
 ### 4. Puppeteer 启动失败
