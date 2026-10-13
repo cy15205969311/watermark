@@ -1,4 +1,7 @@
 function normalizeExtractPayload(result = {}) {
+  if (result.isAnimated === true && result.animationUrl) {
+    result = { ...result, imageUrl: result.animationUrl, imageUrls: [result.animationUrl, ...(result.imageUrls || []).filter(url => url !== result.thumbnailUrl)], pages: (result.pages || []).map((page, index) => index === 0 ? { ...page, imageUrl: result.animationUrl } : page) };
+  }
   const urls = [];
   const pages = [];
   const seen = new Set();
@@ -88,7 +91,7 @@ function normalizeExtractPayload(result = {}) {
   };
 }
 
-const DETAIL_FIELDS = ["source", "metadata", "expectedPageCount", "collectedPageCount", "pageCountConfidence", "completenessStatus", "isComplete", "missingPages", "warnings"];
+const DETAIL_FIELDS = ["source", "metadata", "expectedPageCount", "collectedPageCount", "pageCountConfidence", "completenessStatus", "isComplete", "missingPages", "warnings", "mediaType", "detectedFormat", "isAnimated", "frameCount", "durationMs", "loopCount", "animationUrl", "animationStatus", "resourceRole", "originalResourceStatus", "downloadStatus", "hasVisibleWatermark", "selectionReason"];
 function extractionDetails(result = {}) {
   return Object.fromEntries(DETAIL_FIELDS.filter(key => result[key] !== undefined).map(key => [key, result[key]]));
 }

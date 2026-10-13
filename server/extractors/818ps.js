@@ -1,3 +1,5 @@
+// Standalone test scripts need the same Node 18 Web File compatibility as index.js.
+if (typeof global.File === "undefined") global.File = require("buffer").File;
 const axios = require("axios");
 const cheerio = require("cheerio");
 const puppeteer = require("puppeteer-extra");
@@ -5,8 +7,9 @@ const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 const { withPuppeteerExecutablePath } = require("../utils/puppeteer-launch");
 const { AsyncLocalStorage } = require("async_hooks");
 const { getDefaultPool } = require("../services/browser-pool");
-const { collectPageData, resolveEvidence, buildPageResult, imageIdentity, redact, MAX_PAGES } = require("./818ps-pages");
+const { collectPageData, resolveEvidence, buildPageResult, classifyResource, imageIdentity, redact, MAX_PAGES } = require("./818ps-pages");
 const extractionContext = new AsyncLocalStorage();
+const { inspectMedia } = require("./818ps-animation");
 
 function diagnostic(stage, data = {}) {
   const context = extractionContext.getStore();
@@ -33,18 +36,41 @@ async function validatePageCollection(collection, source) {
       candidate.validationStatus = "budget_exhausted";
       return;
     }
-    const validation = await validateImageResource(candidate.imageUrl);
+    const animationTarget = context?.animationTarget || collection.animationTarget || /\.gif(?:[!?]|$)/i.test(candidate.imageUrl);
+    const validation = await validateImageResource(candidate.imageUrl, { animationTarget });
+    candidate.animationTarget = Boolean(animationTarget);
     Object.assign(candidate, validation, { validationStatus: validation.valid ? "valid" : "invalid" });
+    candidate.resourceRole = classifyResource(candidate);
+    candidate.hasVisibleWatermark = "unknown";
+    diagnostic("animation_validation", { source: candidate.source, resourceRole: candidate.resourceRole, resourceProof: candidate.resourceProof, detectedFormat: candidate.detectedFormat || "unknown", contentType: candidate.contentType, fileSize: candidate.fileSize, width: candidate.width, height: candidate.height, isAnimated: candidate.isAnimated ?? null, frameCount: candidate.frameCount ?? null, durationMs: candidate.durationMs ?? null, hasVisibleWatermark: candidate.hasVisibleWatermark, validationStatus: candidate.validationStatus, selectionReason: candidate.reason });
     diagnostic("candidate", { source: candidate.source, page: candidate.pageNumber, pageId: candidate.pageId, url: candidate.imageUrl, width: candidate.width, height: candidate.height, score: candidate.score, status: candidate.validationStatus, reason: validation.reason });
-  });
+  }, 2);
   diagnostic("collection", { source, raw: collection.candidates.length, filtered: candidates.length, valid: candidates.filter(entry => entry.validationStatus === "valid").length, excluded: collection.excluded || [], evidence: collection.evidence });
-  return buildPageResult(candidates, collection.evidence, { source, candidates });
+  return buildPageResult(candidates, collection.evidence, { source, candidates, metadata: { totalFound: collection.candidates.length, afterFilter: candidates.length, afterDedup: new Set(candidates.filter(entry => entry.validationStatus === "valid").map(entry => entry.imageUrl)).size }, animationTarget: Boolean(context?.animationTarget || collection.animationTarget) });
 }
 
 function mergeStageResults(results) {
   const candidates = results.flatMap(result => result.candidates || []);
   const evidence = results.flatMap(result => result.evidence || []);
-  return buildPageResult(candidates, evidence, { source: results.filter(result => result.success).at(-1)?.source || "none", candidates, warnings: results.flatMap(result => result.warnings?.filter(warning => !["total_page_count_unknown", "missing_or_unmapped_pages"].includes(warning)) || []) });
+  return buildPageResult(candidates, evidence, {
+    source: results.filter(result => result.success).at(-1)?.source || "none",
+    animationTarget: Boolean(extractionContext.getStore()?.animationTarget || results.some(result => result.animationTarget)),
+    candidates,
+    metadata: {
+      totalFound: candidates.length,
+      afterFilter: candidates.length,
+      afterDedup: new Set(candidates.filter(candidate => candidate.validationStatus === "valid").map(candidate => candidate.imageUrl)).size,
+      stages: results.map(result => ({ source: result.source, ...(result.metadata || {}) })),
+      originalResourceDiscovery: {
+        checkedSources: results.map(result => result.source).filter(Boolean),
+        referencedCandidates: candidates.filter(candidate => candidate.roleEvidence === "original_reference_unconfirmed" || ["original_animation", "authorized_export"].includes(candidate.resourceProof?.declaredRole)).length,
+        verifiedCandidates: candidates.filter(candidate => candidate.validationStatus === "valid" && ["original_animation", "authorized_export"].includes(candidate.resourceRole)).length,
+        officialDownloadRequiresLogin: results.some(result => result.metadata?.officialDownloadRequiresLogin),
+        reason: candidates.some(candidate => candidate.validationStatus === "valid" && ["original_animation", "authorized_export"].includes(candidate.resourceRole)) ? "verified_business_resource_reference" : results.some(result => result.metadata?.officialDownloadRequiresLogin) ? "official_download_requires_login" : "no_verified_original_in_checked_sources",
+      },
+    },
+    warnings: results.flatMap(result => result.warnings?.filter(warning => !["total_page_count_unknown", "missing_or_unmapped_pages", "animation_preview_original_unconfirmed", "no_verified_animation_available"].includes(warning)) || []),
+  });
 }
 
 puppeteer.use(StealthPlugin());
@@ -400,8 +426,6 @@ async function resolve818psShareUrl(inputUrl) {
       headers: {
         ...COMMON_HEADERS,
         "User-Agent": getRandomUserAgent(),
-        Referer: "https://818ps.com/",
-        Origin: "https://818ps.com",
       },
     });
 
@@ -478,11 +502,13 @@ function imageMagic(buffer) {
   return buffer.length >= 12 && (buffer.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])) || (buffer[0] === 255 && buffer[1] === 216 && buffer[2] === 255) || /^GIF8[79]a/.test(buffer.toString("ascii", 0, 6)) || (buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP") || (buffer.toString("ascii", 4, 8) === "ftyp" && /avif|avis|heic/.test(buffer.toString("ascii", 8, 32))));
 }
 
-async function validateImageResource(imageUrl) {
+async function validateImageResource(imageUrl, options = {}) {
   const normalizedUrl = normalizeCandidateUrl(imageUrl);
   if (!normalizedUrl) return { valid: false, reason: "invalid_url" };
   const context = extractionContext.getStore();
-  if (context?.validations.has(normalizedUrl)) return context.validations.get(normalizedUrl);
+  const animationTarget = Boolean(options.animationTarget || context?.animationTarget || /\.gif(?:[!?]|$)/i.test(normalizedUrl));
+  const cacheKey = `${animationTarget ? "animation" : "image"}:${normalizedUrl}`;
+  if (context?.validations.has(cacheKey)) return context.validations.get(cacheKey);
   const pending = (async () => {
     const headers = getAntiHotlinkHeaders(normalizedUrl);
     let headStatus = null;
@@ -490,35 +516,56 @@ async function validateImageResource(imageUrl) {
       const response = await axios.head(normalizedUrl, { headers, timeout: 2500, maxRedirects: 3, validateStatus: () => true });
       headStatus = response.status;
       if ([404, 410].includes(headStatus)) return { valid: false, status: headStatus, reason: "not_found_or_expired" };
-    } catch { /* HEAD unsupported or unreliable; inspect a bounded GET body. */ }
+    } catch { /* HEAD unsupported or unreliable; inspect GET bytes. */ }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), animationTarget ? 12000 : 5000);
     try {
-      const response = await axios.get(normalizedUrl, { headers: { ...headers, Range: "bytes=0-65535" }, timeout: 4000, maxRedirects: 3, responseType: "stream", validateStatus: () => true });
-      const status = response.status;
+      async function getBytes(full) {
+        const maxBytes = full ? 20 * 1024 * 1024 : 65536;
+        const response = await axios.get(normalizedUrl, { headers: { ...headers, ...(full ? {} : { Range: "bytes=0-65535" }) }, timeout: full ? 10000 : 4000, signal: controller.signal, maxRedirects: 3, responseType: "stream", validateStatus: () => true });
+        const status = response.status;
+        if (![200, 206].includes(status)) {
+          response.data.destroy();
+          return { error: { valid: false, status, headStatus, reason: status === 403 ? "forbidden_or_expired_signature" : status === 429 ? "rate_limited" : status >= 500 ? "cdn_error" : "http_error" } };
+        }
+        if (full && Number(response.headers["content-length"] || 0) > maxBytes) { response.data.destroy(); return { error: { valid: false, reason: "animation_file_size_limit" } }; }
+        const chunks = [];
+        let size = 0;
+        for await (const chunk of response.data) {
+          if (full && size + chunk.length > maxBytes) { response.data.destroy(); return { error: { valid: false, reason: "animation_file_size_limit" } }; }
+          chunks.push(full ? chunk : chunk.subarray(0, Math.max(0, maxBytes - size)));
+          size += chunk.length;
+          if (!full && size >= maxBytes) { response.data.destroy(); break; }
+        }
+        const buffer = Buffer.concat(chunks);
+        if (full) {
+          const length = Number(response.headers["content-length"] || 0);
+          const total = extractReportedSize(response.headers);
+          if ((length && buffer.length !== length) || (status === 206 && total !== buffer.length)) return { error: { valid: false, status, reason: "truncated_animation_response" } };
+        }
+        return { buffer, response };
+      }
+      let loaded = await getBytes(animationTarget);
+      if (loaded.error) return loaded.error;
+      if (!imageMagic(loaded.buffer)) return { valid: false, status: loaded.response.status, reason: "non_image_body" };
+      const isGif = /^GIF8[79]a/.test(loaded.buffer.toString("ascii", 0, 6));
+      if (isGif && !animationTarget) loaded = await getBytes(true);
+      if (loaded.error) return loaded.error;
+      const { buffer, response } = loaded;
       const contentType = String(response.headers["content-type"] || "");
-      if (![200, 206].includes(status)) {
-        response.data.destroy();
-        return { valid: false, status, headStatus, reason: status === 403 ? "forbidden_or_expired_signature" : status === 429 ? "rate_limited" : status >= 500 ? "cdn_error" : "http_error" };
+      let media = {};
+      if (animationTarget || isGif) {
+        try { media = await inspectMedia(buffer); }
+        catch (error) { return { valid: false, status: response.status, reason: `invalid_animation:${error.message}` }; }
+      } else {
+        try { const metadata = await require("sharp")(buffer, { limitInputPixels: 80000000 }).metadata(); media = { width: metadata.width, height: metadata.height, detectedFormat: metadata.format, mediaType: `image/${metadata.format}` }; } catch {}
       }
-      const chunks = [];
-      let size = 0;
-      for await (const chunk of response.data) {
-        chunks.push(chunk.subarray(0, Math.max(0, 65536 - size)));
-        size += chunk.length;
-        if (size >= 65536) { response.data.destroy(); break; }
-      }
-      const buffer = Buffer.concat(chunks);
-      if (!isImageContentType(response.headers) || !imageMagic(buffer)) return { valid: false, status, contentType, reason: "non_image_body" };
-      let dimensions = {};
-      try {
-        const metadata = await require("sharp")(buffer, { limitInputPixels: 100000000 }).metadata();
-        dimensions = { width: metadata.width, height: metadata.height, aspectRatio: metadata.width / metadata.height };
-      } catch { /* Partial image headers can be valid without decodable dimensions. */ }
-      return { valid: true, status, contentType, contentLength: extractReportedSize(response.headers), ...dimensions, reason: "image_signature_verified" };
+      return { valid: true, status: response.status, contentType, contentLength: extractReportedSize(response.headers), ...media, reason: animationTarget || isGif ? "media_content_verified" : "image_signature_verified" };
     } catch (error) {
-      return { valid: false, reason: /TIME|ABORT/.test(error.code || "") ? "timeout" : error.code || "network_error" };
-    }
+      return { valid: false, reason: /TIME|ABORT|CANCEL/.test(error.code || "") ? "timeout_or_truncated_response" : error.code || "network_error" };
+    } finally { clearTimeout(timer); }
   })();
-  context?.validations.set(normalizedUrl, pending);
+  context?.validations.set(cacheKey, pending);
   return pending;
 }
 
@@ -1582,13 +1629,23 @@ async function extractDynamicContent(url, options = {}) {
       (["font", "media"].includes(request.resourceType()) ? request.abort() : request.continue()).catch(() => {});
     });
     page.on("response", response => {
-      if (networkJson.length >= 100 || Date.now() >= deadline || !/\bjson\b/i.test(response.headers()["content-type"] || "") || !/(818ps|tuguaishou)\.com/.test(response.url()) || Number(response.headers()["content-length"] || 0) > 2000000) return;
+      if (networkJson.length >= 100 || Date.now() >= deadline || !/\bjson\b/i.test(response.headers()["content-type"] || "") || !/(^|\.)(818ps|tuguaishou)\.com$/.test(new URL(response.url()).hostname) || Number(response.headers()["content-length"] || 0) > 2000000) return;
       const task = response.text().then(text => { if (text.length <= 2000000 && networkJson.length < 100) { try { networkJson.push(JSON.parse(text)); } catch {} } }).catch(() => {}).finally(() => pendingResponses.delete(task));
       pendingResponses.add(task);
     });
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: Math.min(options.timeout || BROWSER_TIMEOUT, Math.max(1, deadline - Date.now())) });
     await delay(1500);
     pageData = mergeDynamicCapture({}, await captureDynamicSnapshot(page));
+    if (options.resourceDiscoveryOnly) {
+      // Complete page coverage still doesn't prove an original was discovered.
+      // Inspect passive public data once, without export/login interactions.
+      await delay(Math.min(1200, Math.max(0, deadline - Date.now())));
+      pageData = mergeDynamicCapture(pageData, await captureDynamicSnapshot(page));
+      pageData.jsonData.push(...networkJson.slice(0, 100));
+      pageData.officialDownloadRequiresLogin = await page.evaluate(() => /登录即可下载无水印大图/.test(document.body.innerText));
+      diagnostic("original_resource_discovery", { passive: true, jsonResponses: networkJson.length, officialDownloadRequiresLogin: pageData.officialDownloadRequiresLogin });
+      return pageData;
+    }
     let previousCount = 0;
     let idleRounds = 0;
     for (let round = 0; round < 8 && Date.now() < deadline; round++) {
@@ -1784,7 +1841,7 @@ async function analyzeDynamicData(dynamicData, originalUrl) {
   }
   diagnostic("dynamic_counts", { json: blocks.length, dom: (dynamicData.imageUrls || []).length, performance: (dynamicData.resourceUrls || []).length, activation: (dynamicData.pageSnapshots || []).length });
   const result = await validatePageCollection(collection, collection.candidates.some(entry => entry.source === "dynamic_page_activation") ? "dynamic_page_activation" : "dynamic_json_extraction");
-  return { ...result, originalUrl, warnings: [...result.warnings, ...(dynamicData.warnings || [])] };
+  return { ...result, originalUrl, metadata: { ...result.metadata, officialDownloadRequiresLogin: Boolean(dynamicData.officialDownloadRequiresLogin) }, warnings: [...result.warnings, ...(dynamicData.warnings || [])] };
 }
 
 async function fetchJson(url, referer) {
@@ -1807,7 +1864,8 @@ async function fetchJson(url, referer) {
     }
 
     return response.data;
-  } catch {
+  } catch (error) {
+    diagnostic("share_api_failure", { endpoint: url, reason: error.code || error.message });
     return null;
   }
 }
@@ -1868,6 +1926,8 @@ async function extractFromShareApi(url) {
   }
 
   const collection = collectPageData(payloads, "share_api");
+  collection.animationTarget = Boolean(payloads.team_share_get_templ?.doc?.pageAttr?.pageInfo?.some(page => page.gifInfo?.length));
+  diagnostic("share_api_structure", { pageMap: payloads.team_share_get_templ?.page_map, pageInfoCount: payloads.team_share_get_templ?.doc?.pageAttr?.pageInfo?.length, animationElementReferences: payloads.team_share_get_templ?.doc?.pageAttr?.pageInfo?.reduce((count, page) => count + (page.gifInfo?.length || 0), 0) || 0, note: "gifInfo.imagePath is a canvas animation element; not a rendered full design" });
   return validatePageCollection(collection, "share_api");
 }
 
@@ -2037,6 +2097,10 @@ async function scrapeWebpageEnhanced(url, options = {}) {
 
   const html = response.data;
   const $ = cheerio.load(html);
+  if (/邀请链接失效/.test($(".div-child .font1").text())) {
+    diagnostic("share_unavailable", { reason: "share_link_expired" });
+    return buildPageResult([], [], { source: "static_html", error: "share_link_expired", warnings: ["share_link_expired"] });
+  }
   const jsonBlocks = extractJsonData(html);
   const metaImage = extractMetaImageFromHtml($);
   const cheerioUrls = extractWithCheerio($);
@@ -2066,6 +2130,7 @@ async function extract818ps(url, options = {}) {
     const normalizedUrl = normalizeCandidateUrl(url);
     if (!normalizedUrl) return buildFailureResult("missing_or_invalid_url");
     const resolvedUrl = await resolve818psShareUrl(normalizedUrl);
+    context.animationTarget = options.animationTarget === true || new URL(resolvedUrl).hostname === "gif.818ps.com";
     const query = extractShareQueryParams(resolvedUrl);
     diagnostic("request", { platform: "818ps", target: resolvedUrl });
     const results = [];
@@ -2076,18 +2141,31 @@ async function extract818ps(url, options = {}) {
       return direct ? { ...direct, candidates: direct.imageUrls.map(imageUrl => ({ imageUrl, source: "known_path", role: "page_preview", pageNumber: null, score: 200, validationStatus: "valid" })), evidence: [] } : null;
     }]);
     stages.push(["static_html", () => scrapeWebpageEnhanced(resolvedUrl, options)]);
-    stages.push(["dynamic", async () => analyzeDynamicData(await extractDynamicContent(resolvedUrl, { ...options, expectedPageCount: mergeStageResults(results).expectedPageCount }), resolvedUrl)]);
+    stages.push(["dynamic", async () => {
+      const merged = mergeStageResults(results);
+      const resourceDiscoveryOnly = context.animationTarget && merged.isComplete && merged.isAnimated === true;
+      return analyzeDynamicData(await extractDynamicContent(resolvedUrl, { ...options, expectedPageCount: merged.expectedPageCount, resourceDiscoveryOnly, ...(resourceDiscoveryOnly ? { dynamicTimeout: 12000, timeout: Math.min(options.timeout || 10000, 10000) } : {}) }), resolvedUrl);
+    }]);
     for (const [stage, run] of stages) {
+      // Predicted preview paths cannot supply business proof of an original.
+      if (stage === "known_path" && context.animationTarget && mergeStageResults(results).isComplete) continue;
       if (Date.now() >= context.deadline) { results.push({ warnings: ["extraction_budget_exhausted"] }); break; }
       diagnostic("stage_start", { stage });
-      try { const result = await run(); if (result) results.push(result); }
+      try {
+        const result = await run();
+        if (result) results.push(result);
+        if (result?.animationTarget || result?.isAnimated === true) context.animationTarget = true;
+        if (result?.error === "share_link_expired") break;
+      }
       catch (error) { diagnostic("stage_failure", { stage, reason: error.code || error.message }); results.push({ warnings: [`${stage}_failed:${error.code || error.name}`] }); }
       const merged = mergeStageResults(results);
       diagnostic("coverage", { stage, expected: merged.expectedPageCount, confidence: merged.pageCountConfidence, identified: merged.pages.map(page => page.pageNumber), missing: merged.missingPages, completeness: merged.completenessStatus });
-      if (merged.isComplete) break;
+      const allPagesAuthorized = merged.pages.length > 0 && merged.pages.every(page => ["original_animation", "authorized_export"].includes(page.resourceRole));
+      if (merged.isComplete && (!context.animationTarget || allPagesAuthorized || stage === "dynamic")) break;
     }
     const result = mergeStageResults(results);
-    diagnostic("final", { source: result.source, expected: result.expectedPageCount, verifiedPreviews: result.pageCount, missing: result.missingPages, duplicates: result.metadata.duplicateCandidates, rejectedPageMappings: result.metadata.rejectedPageMappings, completeness: result.completenessStatus });
+    diagnostic("resource_selected", { source: result.pages[0]?.source, resourceRole: result.resourceRole, detectedFormat: result.detectedFormat, mediaType: result.mediaType, isAnimated: result.isAnimated, frameCount: result.frameCount, durationMs: result.durationMs, animationStatus: result.animationStatus, hasVisibleWatermark: result.hasVisibleWatermark, originalResourceStatus: result.originalResourceStatus, downloadStatus: result.downloadStatus, selectionReason: result.selectionReason, originalResourceDiscovery: result.metadata.originalResourceDiscovery });
+    diagnostic("final", { source: result.source, expected: result.expectedPageCount, verifiedPreviews: result.pageCount, missing: result.missingPages, duplicates: result.metadata.duplicateCandidates, rejectedPageMappings: result.metadata.rejectedPageMappings, completeness: result.completenessStatus, mediaType: result.mediaType, isAnimated: result.isAnimated, animationStatus: result.animationStatus });
     // Internal candidates are diagnostic working data; expose only selected main previews.
     delete result.candidates;
     return attachResolvedUrlContext(result.success ? result : { ...result, error: "no_valid_page_preview", message: "image_extract_failed" }, normalizedUrl, resolvedUrl);
@@ -2095,4 +2173,4 @@ async function extract818ps(url, options = {}) {
 }
 
 module.exports = { extract818ps, validateImageUrl, validateImageResource, normalizeResultImages,
-  _test: { extractFromShareApi, scrapeWebpageEnhanced, analyzeDynamicData, extractDynamicContent, captureDynamicSnapshot, activateDynamicPage, captureActivatedPage, currentPreviewUrls, mergeStageResults, build818psVariants, imageMagic } };
+  _test: { validatePageCollection, extractFromShareApi, scrapeWebpageEnhanced, analyzeDynamicData, extractDynamicContent, captureDynamicSnapshot, activateDynamicPage, captureActivatedPage, currentPreviewUrls, mergeStageResults, build818psVariants, imageMagic } };

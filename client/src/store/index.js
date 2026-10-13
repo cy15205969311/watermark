@@ -81,7 +81,10 @@ function normalizeRecordStatus(status) {
   return "success";
 }
 
-function normalizeRecord(record = {}) {
+export function normalizeRecord(record = {}) {
+  let details = {};
+  try { details = JSON.parse(record.extraction_metadata_json || "{}"); } catch {}
+  record = { ...details, ...record };
   const imageUrls = [];
   const seen = new Set();
 
@@ -100,6 +103,7 @@ function normalizeRecord(record = {}) {
     imageUrls.push(clientUrl);
   };
 
+  if (record.isAnimated === true && record.animationUrl) addUrl(record.animationUrl);
   (record.imageUrls || []).forEach(addUrl);
   (record.images || []).forEach(addUrl);
   parseJsonField(record.image_urls_json).forEach(addUrl);
@@ -109,6 +113,7 @@ function normalizeRecord(record = {}) {
 
   const pages = rawPages
     .map((page, index) => ({
+      ...page,
       page: Number(page && page.page) || index + 1,
       imageUrl:
         typeof (page && page.imageUrl) === "string"
@@ -117,9 +122,10 @@ function normalizeRecord(record = {}) {
     }))
     .filter((page) => Boolean(page.imageUrl) && !isBlockedPreviewAssetUrl(page.imageUrl));
 
+  pages.sort((a, b) => a.page - b.page);
   pages.forEach((page) => addUrl(page.imageUrl));
   addUrl(record.imageUrl);
-  addUrl(record.thumbnailUrl || record.thumbnail_url);
+  if (!imageUrls.length) addUrl(record.thumbnailUrl || record.thumbnail_url);
 
   const preferredThumbnailUrl =
     !isBlockedPreviewAssetUrl(record.thumbnailUrl)
@@ -156,6 +162,8 @@ function normalizeRecord(record = {}) {
         : Number(record.is_multi_page || 0) === 1 || pageCount > 1;
 
   return {
+    ...pickExtractionDetails(record),
+    animationUrl: record.animationUrl ? toClientImageUrl(record.animationUrl) : null,
     id: record.id,
     originalUrl: record.originalUrl || record.original_url || "",
     platform: record.platform || "Unknown",
@@ -169,6 +177,11 @@ function normalizeRecord(record = {}) {
     status: normalizeRecordStatus(record.status),
     timestamp: record.timestamp || record.created_at || new Date().toISOString(),
   };
+}
+
+export function pickExtractionDetails(result = {}) {
+  const fields = ["source", "metadata", "expectedPageCount", "collectedPageCount", "pageCountConfidence", "completenessStatus", "isComplete", "missingPages", "warnings", "mediaType", "detectedFormat", "isAnimated", "frameCount", "durationMs", "loopCount", "animationUrl", "animationStatus", "resourceRole", "originalResourceStatus", "downloadStatus", "hasVisibleWatermark", "selectionReason"];
+  return Object.fromEntries(fields.filter(key => result[key] !== undefined).map(key => [key, result[key]]));
 }
 
 export default createStore({
@@ -217,13 +230,15 @@ export default createStore({
 
     async parseUrl(
       { commit },
-      { url, platform, thumbnailUrl, imageUrl, imageUrls, pages, pageCount, isMultiPage, status }
+      input
     ) {
       try {
         commit("SET_LOADING", true);
         commit("SET_ERROR", null);
 
+        const { url, platform, thumbnailUrl, imageUrl, imageUrls, pages, pageCount, isMultiPage, status } = input;
         const { data } = await api.post("/parse", {
+          ...pickExtractionDetails(input),
           url,
           platform,
           thumbnailUrl,

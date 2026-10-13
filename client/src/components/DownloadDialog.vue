@@ -2,8 +2,11 @@
   <el-dialog v-model="visible" title="下载选项" :width="'720px'" @close="onClose">
     <div class="download-grid">
       <div class="left">
-        <h4>选择格式</h4>
-        <el-radio-group v-model="format" size="small">
+        <p v-if="record?.isAnimated === true" role="status">下载已验证的动态 {{ record.detectedFormat?.toUpperCase() || 'GIF' }} 文件，保留动画帧。</p>
+        <p v-if="resourceStatusText(record || {})" role="status">{{ resourceStatusText(record || {}) }}</p>
+        <p v-if="record?.downloadStatus === 'preview_only' && officialShareUrl(record)"><a :href="officialShareUrl(record)" target="_blank" rel="noopener noreferrer">前往官方分享页，按平台权限登录并下载</a></p>
+        <h4 v-else>选择格式</h4>
+        <el-radio-group v-if="record?.isAnimated !== true" v-model="format" size="small">
           <el-radio-button label="png">高精PNG</el-radio-button>
           <el-radio-button label="jpg">JPG</el-radio-button>
           <el-radio-button label="gif">GIF动图</el-radio-button>
@@ -25,7 +28,7 @@
       <div class="right">
         <h4>预览</h4>
         <div class="preview">
-          <img :src="record?.thumbnailUrl" alt="preview" />
+          <img :src="record?.animationUrl || record?.imageUrl || record?.thumbnailUrl" alt="preview" />
         </div>
         <div class="note">文件名：{{ filename }}</div>
       </div>
@@ -35,6 +38,7 @@
 
 <script setup>
 import { computed, watch, ref } from 'vue'
+import { resourceStatusText, officialShareUrl } from '../utils/resourceStatus'
 
 const props = defineProps({
   modelValue: { type: Boolean, required: true },
@@ -52,7 +56,7 @@ watch(visible, v => emit('update:modelValue', v))
 
 const filename = computed(() => {
   const id = props.record?.id || Date.now()
-  return `download-${id}.${format.value}`
+  return `download-${id}.${props.record?.isAnimated ? props.record.detectedFormat || 'gif' : format.value}`
 })
 
 function onClose() {

@@ -10,6 +10,8 @@
  */
 
 const { extract818ps } = require('./extractors/818ps');
+const { redact } = require('./extractors/818ps-pages');
+const { closeDefaultPool } = require('./services/browser-pool');
 
 // 测试 URL（请替换为实际的 818ps 页面 URL）
 const TEST_URL = process.argv[2] || 'https://818ps.com/tpl/xxxxx';
@@ -46,15 +48,15 @@ async function runTest() {
 
     if (result.success && result.images.length > 0) {
       console.log('  📊 统计信息:');
-      console.log('    - 检测到图片:', result.metadata.totalFound);
-      console.log('    - 清洗后图片:', result.metadata.afterClean);
-      console.log('    - 去重后图片:', result.metadata.afterDedup);
+      console.log('    - 检测到图片:', result.metadata.results);
+      console.log('    - 清洗后图片:', result.collectedPageCount);
+      console.log('    - 去重后图片:', result.pageCount);
       console.log('    - 最终返回:', result.images.length);
       console.log('');
 
       console.log('  📷 提取到的图片:');
       result.images.forEach((img, index) => {
-        console.log(`    ${index + 1}. ${img}`);
+        console.log(`    ${index + 1}. ${redact(img)}`);
       });
       console.log('');
 
@@ -64,7 +66,7 @@ async function runTest() {
       console.log(`    ${result.images.every(url => url.includes('tuguaishou.com')) ? '✅' : '❌'} 所有图片来自 tuguaishou.com`);
       console.log(`    ${result.images.every(url => !url.includes('base64')) ? '✅' : '❌'} 没有 base64 图片`);
       console.log(`    ${result.images.every(url => !url.includes('placeholder')) ? '✅' : '❌'} 没有 placeholder 图片`);
-      console.log(`    ${result.images.every(url => !url.match(/![a-zA-Z0-9]+$/)) ? '✅' : '❌'} 已移除图片处理后缀`);
+      console.log('    保留已验证的 CDN 处理后缀与授权参数');
       console.log('');
 
       // 检查是否有重复
@@ -82,6 +84,9 @@ async function runTest() {
     console.log('╚════════════════════════════════════════════════════════════════╝');
     console.log('');
 
+    console.log("完整性 / 动画:", result.completenessStatus, result.expectedPageCount, result.missingPages, result.animationStatus, result.frameCount, result.durationMs, result.resourceRole);
+    console.log("原始资源 / 下载 / 水印:", result.originalResourceStatus, result.downloadStatus, result.hasVisibleWatermark, result.selectionReason);
+    await closeDefaultPool();
     process.exit(result.success ? 0 : 1);
 
   } catch (error) {

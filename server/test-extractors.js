@@ -11,6 +11,8 @@
  */
 
 const { extract818ps } = require('./extractors/818ps');
+const { redact } = require('./extractors/818ps-pages');
+const { closeDefaultPool } = require('./services/browser-pool');
 const { extractHuaban } = require('./extractors/huaban');
 const { extractCanva } = require('./extractors/canva');
 const { extractImages } = require('./services/imageExtractor');
@@ -38,7 +40,7 @@ async function test() {
   console.log('='.repeat(80));
   console.log('');
   console.log('平台:', platform);
-  console.log('URL:', url);
+  console.log('URL:', redact(url));
   console.log('');
   console.log('='.repeat(80));
   console.log('');
@@ -79,12 +81,14 @@ async function test() {
     console.log('状态:', result.success ? '✅ 成功' : '❌ 失败');
     console.log('平台:', result.platform || platform);
     console.log('耗时:', duration, '秒');
+    console.log('完整性 / 动画:', result.completenessStatus, result.expectedPageCount, result.missingPages, result.animationStatus, result.frameCount, result.durationMs, result.resourceRole);
+    console.log('原始资源 / 下载 / 水印:', result.originalResourceStatus, result.downloadStatus, result.hasVisibleWatermark, result.selectionReason);
     console.log('');
 
     if (result.success) {
       console.log('找到的图片:');
       result.images.forEach((url, index) => {
-        console.log(`  ${index + 1}. ${url}`);
+        console.log(`  ${index + 1}. ${redact(url)}`);
       });
 
       if (result.metadata) {
@@ -98,11 +102,11 @@ async function test() {
 
       console.log('');
       console.log('JSON 输出:');
-      console.log(JSON.stringify({
+      console.log(redact(JSON.stringify({
         success: result.success,
         platform: result.platform || platform,
         images: result.images
-      }, null, 2));
+      }, null, 2)));
 
     } else {
       console.log('错误:', result.error || result.message);
@@ -110,6 +114,8 @@ async function test() {
 
     console.log('');
     console.log('='.repeat(80));
+    await closeDefaultPool();
+    if (!result.success) process.exitCode = 1;
 
   } catch (error) {
     console.error('');

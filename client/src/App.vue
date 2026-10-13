@@ -17,6 +17,7 @@
 
       <!-- 图片预览对话框 -->
       <el-dialog v-model="previewDialogVisible" title="查看结果" width="550px" :close-on-click-modal="true">
+        <p v-if="resourceStatusText(previewRecord || {})" role="status">{{ resourceStatusText(previewRecord || {}) }}</p>
         <div class="preview-container">
           <el-image :src="previewImageUrl" fit="contain"
             :preview-src-list="previewImageUrls.length ? previewImageUrls : [previewImageUrl]" :initial-index="0"
@@ -26,7 +27,7 @@
                 <el-icon :size="50">
                   <Picture />
                 </el-icon>
-                <p>图片加载失败</p>
+                <p>图片加载失败，资源可能已过期，请重新解析</p>
               </div>
             </template>
           </el-image>
@@ -240,6 +241,8 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, reactive, watch } from 'vue'
 import { useStore } from 'vuex'
+import { pickExtractionDetails } from './store'
+import { resourceStatusText } from './utils/resourceStatus'
 import { Grid, Refresh, Connection, Search, QuestionFilled, Picture, Download, Delete } from '@element-plus/icons-vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import HistoryItem from './components/HistoryItem.vue'
@@ -277,6 +280,7 @@ const previewDialogVisible = ref(false)
 const previewImageUrl = ref('')
 const previewImageUrls = ref([])
 const previewTextLayers = ref([])
+const previewRecord = ref(null)
 
 // 批量选择状态
 const selectedRecords = ref(new Set())
@@ -324,10 +328,11 @@ function getRecordImageUrls(record) {
     urls.push(normalized)
   }
 
+  if (record.isAnimated === true && record.animationUrl) addUrl(record.animationUrl)
   ;(record.imageUrls || []).forEach(addUrl)
   ;(record.pages || []).forEach((page) => addUrl(page?.imageUrl))
   addUrl(record.imageUrl)
-  addUrl(record.thumbnailUrl)
+  if (!urls.length) addUrl(record.thumbnailUrl)
 
   return urls
 }
@@ -358,28 +363,30 @@ function normalizePages(pages, fallbackUrls = []) {
     })
   }
 
-  return normalizedPages
+  return normalizedPages.sort((a, b) => a.page - b.page)
 }
 
 async function downloadRecordImages(record, format = 'jpg') {
   const urls = getRecordImageUrls(record)
   if (!urls.length) return
 
-  const ext = format || 'jpg'
   for (let index = 0; index < urls.length; index += 1) {
     const url = urls[index]
+    const resource = { ...(index === 0 ? record : {}), ...((record.pages || []).find(page => page.imageUrl === url) || {}) }
+    const ext = resource.isAnimated === true ? resource.detectedFormat || 'gif' : format || 'jpg'
+    const pageNumber = resource.page || index + 1
     const link = document.createElement('a')
     link.href = url
     link.download = urls.length > 1
-      ? `download-${record.id}-p${index + 1}.${ext}`
+      ? `download-${record.id}-p${pageNumber}.${ext}`
       : `download-${record.id}.${ext}`
-    link.target = '_blank'
+    if (!url.startsWith('data:') && new URL(url, location.href).origin !== location.origin) link.target = '_blank'
     link.rel = 'noopener noreferrer'
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
 
-    if (!url.startsWith('data:') && !/blob:/.test(url)) {
+    if (!url.startsWith('data:') && !/blob:/.test(url) && new URL(url, location.href).origin !== location.origin) {
       window.open(url, '_blank', 'noopener')
     }
 
@@ -400,13 +407,12 @@ function isSelected(recordId) {
 }
 
 function openDownload(record) {
-  console.log('打开下载对话框', record)
   downloadRecord.value = record
   downloadDialogVisible.value = true
 }
 
 function viewResult(record) {
-  console.log('查看结果', record)
+  previewRecord.value = record
   previewImageUrls.value = getRecordImageUrls(record)
   previewImageUrl.value = previewImageUrls.value[0] || record.thumbnailUrl || record.imageUrl || ''
   previewTextLayers.value = record.textLayers || []
@@ -548,7 +554,7 @@ const handleParse = async () => {
 
     platform = detectPlatformFromUrl(originalUrl)
 
-    console.log('🚀 开始解析:', { url: originalUrl, platform })
+    console.log('🚀 开始解析:', { platform })
 
     // 使用已确认的URL格式直接构建
     let thumbnailUrl = `https://picsum.photos/400/300?random=${Date.now()}`
@@ -607,6 +613,7 @@ const handleParse = async () => {
     let extractedPageCount = 0
     let extractedIsMultiPage = false
     let extractedStatus = 'success'
+    let extractedDetails = {}
 
     try {
       const response = await fetch(buildApiUrl('/extract-image'), {
@@ -631,6 +638,7 @@ const handleParse = async () => {
         backendImageUrls
       )
       const backendStatus = data.status || 'success'
+      extractedDetails = pickExtractionDetails(data)
 
       if (response.ok && data.success) {
         if (backendStatus === 'preview_only' && backendImageUrls.length === 0) {
@@ -659,12 +667,17 @@ const handleParse = async () => {
             extractedImageUrls.length > 1
           extractedStatus = backendStatus
 
+          if (data.completenessStatus === 'partial') noticeMessage = `已提取 ${data.collectedPageCount} 页，缺少第 ${(data.missingPages || []).join('、')} 页`
+          else if (data.completenessStatus === 'unknown') noticeMessage = '已取得可用预览，尚无法确认是否覆盖全部页面'
+          const resourceNotice = resourceStatusText(data)
+          if (resourceNotice) noticeMessage = [noticeMessage, resourceNotice].filter(Boolean).join('；')
           if (backendStatus !== 'success' || data.warningText) {
             noticeMessage = data.warningText || data.message || null
           }
 
-          console.log('✅ 后端验证成功，使用真实图片:', thumbnailUrl)
+          console.log('✅ 后端验证成功:', { resourceRole: data.resourceRole, downloadStatus: data.downloadStatus })
         } else {
+          if (platform === '818ps') throw new Error(data.message || '未取得可用设计页预览')
           const errorMsg = data.message || '无法获取真实图片'
           console.warn('⚠️ 后端响应未返回有效图片:', errorMsg)
 
@@ -678,6 +691,7 @@ const handleParse = async () => {
       } else {
         // 后端返回错误，使用占位图作为降级方案
         const errorMsg = data.message || '无法获取真实图片'
+        if (platform === '818ps') throw new Error(errorMsg)
         console.warn('⚠️ 后端响应错误 (HTTP ' + response.status + '):', errorMsg)
 
         // 根据平台使用不同的占位图策略
@@ -692,6 +706,7 @@ const handleParse = async () => {
       }
     } catch (error) {
       console.error('❌ 后端API调用失败:', error.message)
+      if (platform === '818ps') throw error
 
       // 使用降级方案
       if (platform === '818ps' && thumbnailUrl.includes('img.818ps.com')) {
@@ -716,7 +731,7 @@ const handleParse = async () => {
       ElMessage.warning(noticeMessage)
     }
 
-    console.log('🎯 最终使用的图片URL:', thumbnailUrl)
+    console.log('🎯 最终结果:', { pageCount: extractedPageCount, resourceRole: extractedDetails.resourceRole })
 
     const normalizedImageUrls = getRecordImageUrls({
       imageUrls: extractedImageUrls,
@@ -729,9 +744,10 @@ const handleParse = async () => {
       extractedPageCount || normalizedPages.length || normalizedImageUrls.length
     const normalizedIsMultiPage =
       extractedIsMultiPage || normalizedPageCount > 1 || normalizedImageUrls.length > 1
-    const finalThumbnailUrl = normalizedImageUrls[0] || thumbnailUrl
+    const finalThumbnailUrl = thumbnailUrl || normalizedImageUrls[0]
 
     await store.dispatch('parseUrl', {
+      ...extractedDetails,
       url: originalUrl,
       platform,
       thumbnailUrl: finalThumbnailUrl,

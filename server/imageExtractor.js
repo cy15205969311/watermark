@@ -7,6 +7,8 @@
 const axios = require("axios");
 const cheerio = require("cheerio");
 const qs = require("querystring");
+const { redact, buildPageResult } = require("./extractors/818ps-pages");
+const { validateImageResource: validate818psResource } = require("./extractors/818ps");
 const { extractViaThirdPartyAPIWithCache } = require("./thirdPartyApiGateway");
 const { extract818ps } = require("./extractors/818ps");
 const { extractGaoding } = require("./extractors/gaoding");
@@ -417,6 +419,7 @@ async function extract818psImage(url, options = {}) {
         ...options,
       });
 
+      if (optimizedResult?.warnings?.includes("share_link_expired")) return optimizedResult;
       if (optimizedResult && optimizedResult.success && optimizedResult.imageUrl) {
         console.log("✅ 新版 818ps 提取器命中:", {
           source: optimizedResult.source,
@@ -432,7 +435,7 @@ async function extract818psImage(url, options = {}) {
     const picId = urlObj.searchParams.get("picId");
     const upicId = urlObj.searchParams.get("upicId");
 
-    console.log("🔍 开始提取818ps图片:", { url, picId, upicId });
+    console.log("🔍 开始提取818ps图片:", { url: redact(url), picId, upicId });
 
     // 如果有 picId 和 upicId，优先尝试已知的 URL 格式并验证
     if (picId && upicId) {
@@ -450,7 +453,7 @@ async function extract818psImage(url, options = {}) {
       for (const testUrl of possibleUrls) {
         const isValid = await validateImageUrl(testUrl);
         if (isValid) {
-          console.log("✅ 找到有效的图片URL:", testUrl);
+          console.log("✅ 找到有效的图片URL:", redact(testUrl));
           return {
             imageUrl: testUrl,
             picId,
@@ -520,7 +523,7 @@ async function extract818psImage(url, options = {}) {
           }
 
           if (imageUrl) {
-            console.log("🎯 从网页中找到图片URL (selector):", imageUrl);
+            console.log("🎯 从网页中找到图片URL (selector):", redact(imageUrl));
             return {
               imageUrl,
               picId,
@@ -542,7 +545,7 @@ async function extract818psImage(url, options = {}) {
           c.includes("img.818ps.com") ||
           c.includes("818ps")
         ) {
-          console.log("🎯 从脚本/文本中提取到候选图片URL:", c);
+          console.log("🎯 从脚本/文本中提取到候选图片URL:", redact(c));
           // 对 tuguaishou/818ps 的链接做无水印变体尝试
           let finalUrl = c.startsWith("http") ? c : `https:${c}`;
           if (!finalUrl.includes("tuguaishou.com")) {
@@ -571,24 +574,7 @@ async function extract818psImage(url, options = {}) {
       console.error("❌ 网页抓取失败:", scrapeError.message);
     }
 
-    // 如果所有方法都失败，先尝试第三方去水印服务作为兜底
-    try {
-      const third = await callThirdPartyService(url);
-      if (third && third.imageUrl) {
-        console.log(
-          "✅ 第三方服务提供了图片URL，作为回退使用:",
-          third.imageUrl
-        );
-        return {
-          imageUrl: third.imageUrl,
-          platform: "818ps",
-          source: "third-party",
-        };
-      }
-    } catch (e) {
-      console.warn("⚠️ 第三方兜底调用发生错误:", e.message);
-    }
-
+    // The outer extractor already attempted the gateway; retain its result there.
     // 【新增】方法 3: 尝试 Puppeteer 隐身抓取（应对强反爬虫）
     console.log("🤖 尝试 Puppeteer 隐身抓取（应对强反爬虫）...");
     try {
@@ -609,7 +595,7 @@ async function extract818psImage(url, options = {}) {
         }
       }
       if (imageUrl) {
-        console.log("✅ Puppeteer 隐身抓取成功:", imageUrl);
+        console.log("✅ Puppeteer 隐身抓取成功:", redact(imageUrl));
         return {
           imageUrl,
           picId,
@@ -1534,7 +1520,7 @@ async function extractImage(url, platform, options = {}) {
   console.log("\n=".repeat(60));
   console.log("🚀 开始提取图片");
   console.log(`   平台: ${platform}`);
-  console.log(`   链接: ${url.substring(0, 100)}`);
+  console.log(`   链接: ${redact(url).substring(0, 160)}`);
   console.log("=".repeat(60));
   const shouldPreferLocalChuangkit = isChuangkitTarget(url, platform);
   const shouldUseHuabanLocalOnly = isHuabanTarget(url, platform);
@@ -1644,6 +1630,12 @@ async function extractImage(url, platform, options = {}) {
           result.status === "preview_image" ||
           result.status === "preview_only")
       ) {
+        if (shouldPreferLocal818ps && !result.completenessStatus) {
+          if (!/\/(?:user_preview(?:_ue)?|user_work|works|gif_complete_img)\//i.test(result.imageUrl || "")) throw new Error("legacy_resource_has_no_page_context");
+          const resource = await validate818psResource(result.imageUrl);
+          result = buildPageResult(resource.valid ? [{ imageUrl: result.imageUrl, source: result.source, role: "page_preview", validationStatus: "valid", pageNumber: null, ...resource }] : [], [], { source: result.source, warnings: ["legacy_page_mapping_unknown"] });
+          if (!result.success) throw new Error("legacy_preview_validation_failed");
+        }
         console.log("\n✅ 【成功】本地提取返回结果\n");
         return result;
       }
@@ -1656,15 +1648,12 @@ async function extractImage(url, platform, options = {}) {
     console.log("❌ 所有主要方案都失败，无法获取真实图片URL");
     if (thirdPartyFallback) {
       console.log("\nℹ️ 创客贴本地套图未命中，回退第三方单图结果...\n");
-      return shouldPreferLocal818ps
-        ? await require("./extractors/818ps")._test.mergeStageResults([
-            await (async () => {
-              const imageUrl = thirdPartyFallback.imageUrl;
-              const valid = await require("./extractors/818ps").validateImageUrl(imageUrl);
-              return { source: "thirdparty_fallback", candidates: valid ? [{ imageUrl, source: "thirdparty_fallback", role: "page_preview", validationStatus: "valid", pageNumber: null }] : [], evidence: [] };
-            })(),
-          ])
-        : thirdPartyFallback;
+      if (shouldPreferLocal818ps) {
+        const imageUrl = thirdPartyFallback.imageUrl;
+        const resource = await validate818psResource(imageUrl);
+        return buildPageResult(resource.valid ? [{ imageUrl, source: "thirdparty_fallback", role: "page_preview", validationStatus: "valid", pageNumber: null, ...resource }] : [], [], { source: "thirdparty_fallback" });
+      }
+      return thirdPartyFallback;
     }
 
     console.log("\n" + "=".repeat(60) + "\n");

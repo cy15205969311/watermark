@@ -17,6 +17,9 @@
       <span class="timestamp">{{ formatTime(record.timestamp) }}</span>
     </div>
 
+    <p v-if="record.completenessStatus === 'partial'" role="status">已提取 {{ record.pageCount }} / {{ record.expectedPageCount }} 页，缺少第 {{ (record.missingPages || []).join('、') }} 页</p>
+    <p v-else-if="record.completenessStatus === 'unknown'" role="status">已取得可用预览，完整页数尚未确认</p>
+    <p v-if="resourceStatusText(record)" role="status">{{ resourceStatusText(record) }}<span v-if="record.animationStatus === 'verified_animated'"> · {{ record.frameCount }} 帧<span v-if="record.durationMs != null"> · {{ record.durationMs }}ms</span></span></p>
     <!-- 缩略图 -->
     <div class="thumbnail-container">
       <div v-if="isExpired" class="expired-overlay">
@@ -70,6 +73,7 @@ import { computed } from 'vue'
 import { useStore } from 'vuex'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import { Picture, Download, Clock, Delete } from '@element-plus/icons-vue'
+import { resourceStatusText } from '../utils/resourceStatus'
 
 const store = useStore()
 
@@ -97,6 +101,10 @@ const canDownload = computed(() => {
   )
 })
 const statusMeta = computed(() => {
+  if (props.record.completenessStatus === 'partial') return { type: 'warning', label: '部分提取' }
+  if (props.record.animationStatus === 'preview_only') return { type: 'warning', label: '静态预览' }
+  if (props.record.downloadStatus === 'preview_only') return { type: 'warning', label: '仅有预览' }
+  if (props.record.completenessStatus === 'unknown') return { type: 'info', label: '完整性待确认' }
   switch (props.record.status) {
     case 'preview_image':
       return { type: 'warning', label: '预览图' }

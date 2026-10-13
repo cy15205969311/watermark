@@ -24,6 +24,7 @@ const path = require("path");
 const dotenv = require("dotenv");
 const { extractImage } = require("./imageExtractor");
 const { normalizeExtractPayload, extractionDetails, restoreRecord } = require("./utils/extractPayload");
+const { redact } = require("./extractors/818ps-pages");
 const {
   initDefaultPool,
   closeDefaultPool,
@@ -150,6 +151,9 @@ const LOCAL_UPLOAD_IMAGE_MIME_TYPES = new Set([
 ]);
 const IMAGE_PROXY_ALLOWED_HOSTS = [
   "huabanimg.com",
+  "img.tuguaishou.com",
+  "img.818ps.com",
+  "cdn.818ps.com",
 ];
 
 function normalizeLocalWatermarkMethod(method) {
@@ -237,6 +241,12 @@ function getImageProxyHeaders(targetUrl) {
   if (hostname === "huabanimg.com" || hostname.endsWith(".huabanimg.com")) {
     headers.Referer = "https://huaban.com/";
     headers.Origin = "https://huaban.com";
+  } else if (hostname === "img.tuguaishou.com") {
+    headers.Referer = "https://tuguaishou.com/";
+    headers.Origin = "https://tuguaishou.com";
+  } else if (hostname.endsWith(".818ps.com")) {
+    headers.Referer = "https://818ps.com/";
+    headers.Origin = "https://818ps.com";
   }
 
   return headers;
@@ -264,15 +274,21 @@ app.get("/api/proxy-image", async (req, res) => {
   }
 
   try {
-    const upstream = await axios.get(targetUrl.toString(), {
+    const upstream = await axios.request({
+      url: targetUrl.toString(),
+      method: req.method === "HEAD" ? "HEAD" : "GET",
       responseType: "stream",
       timeout: 15000,
       maxRedirects: 5,
-      headers: getImageProxyHeaders(targetUrl.toString()),
+      beforeRedirect: (options) => {
+        if (!isAllowedProxyHost(options.hostname)) throw new Error("proxy_redirect_host_not_allowed");
+      },
+      headers: { ...getImageProxyHeaders(targetUrl.toString()), ...(req.headers.range ? { Range: req.headers.range } : {}) },
       validateStatus: () => true,
     });
 
     if (![200, 206].includes(upstream.status)) {
+      upstream.data?.destroy?.();
       return res.status(502).json({
         success: false,
         message: `图片代理失败: 上游返回 ${upstream.status}`,
@@ -285,6 +301,7 @@ app.get("/api/proxy-image", async (req, res) => {
       !contentType.startsWith("image/") &&
       !contentType.includes("application/octet-stream")
     ) {
+      upstream.data?.destroy?.();
       return res.status(502).json({
         success: false,
         message: "图片代理失败: 上游未返回图片内容",
@@ -298,8 +315,12 @@ app.get("/api/proxy-image", async (req, res) => {
     if (upstream.headers["content-length"]) {
       res.setHeader("Content-Length", upstream.headers["content-length"]);
     }
+    if (upstream.headers["content-range"]) res.setHeader("Content-Range", upstream.headers["content-range"]);
+    if (upstream.headers["accept-ranges"]) res.setHeader("Accept-Ranges", upstream.headers["accept-ranges"]);
     res.setHeader("Content-Disposition", "inline");
-    res.setHeader("Cache-Control", "public, max-age=3600");
+    res.setHeader("Cache-Control", "private, no-cache");
+    if (req.method === "HEAD") { upstream.data?.destroy?.(); return res.end(); }
+    res.on("close", () => upstream.data.destroy());
 
     upstream.data.on("error", (streamError) => {
       console.error("图片代理流式传输失败:", streamError.message);
@@ -462,7 +483,7 @@ app.post("/api/upload-image", upload.single("image"), async (req, res) => {
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
   if (Object.keys(req.body).length > 0) {
-    console.log("  请求体:", JSON.stringify(req.body).substring(0, 200));
+    console.log("  请求体:", redact(JSON.stringify(req.body)).substring(0, 200));
   }
   next();
 });
@@ -973,4 +994,5 @@ function startServer(port) {
   });
 }
 
-startServer(PORT);
+if (require.main === module) startServer(PORT);
+module.exports = { app, ensureParseRecordColumns };

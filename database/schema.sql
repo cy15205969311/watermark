@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS parse_records (
   client_ip VARCHAR(64) NULL COMMENT 'Client IP captured from proxy headers',
   thumbnail_url LONGTEXT COMMENT 'Support base64 images up to 16MB for Puppeteer screenshots',
   status VARCHAR(32) NOT NULL DEFAULT 'success' COMMENT 'success / expired / processing / preview_image / preview_only',
+  extraction_metadata_json LONGTEXT NULL COMMENT 'Extraction completeness and verified animation metadata',
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   INDEX idx_created_at (created_at),

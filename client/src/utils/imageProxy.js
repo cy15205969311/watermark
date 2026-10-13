@@ -33,7 +33,7 @@ export function shouldUseImageProxy(url = "") {
   }
 
   const hostname = getHostname(normalized);
-  return hostname === "huabanimg.com" || hostname.endsWith(".huabanimg.com");
+  return hostname === "huabanimg.com" || hostname.endsWith(".huabanimg.com") || ["img.tuguaishou.com", "img.818ps.com", "cdn.818ps.com"].includes(hostname);
 }
 
 export function toClientImageUrl(url = "") {
