@@ -13,10 +13,9 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 const puppeteer = require("puppeteer-extra");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+const { withPuppeteerExecutablePath } = require("../utils/puppeteer-launch");
 
 puppeteer.use(StealthPlugin());
-
-const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
 
 const IMAGE_URL_PATTERN =
   /(?<url>(?:https?:)?\/\/[^\s"'<>\\]+?\.(?:png|jpe?g|webp|gif)(?:\?[^\s"'<>\\]*)?)/i;
@@ -74,6 +73,9 @@ const GAODING_HEADERS = {
 const STATIC_TIMEOUT = 15000;
 const VALIDATE_TIMEOUT = 8000;
 const DYNAMIC_TIMEOUT = 45000;
+const MIN_PRIMARY_IMAGE_WIDTH = 320;
+const MIN_PRIMARY_IMAGE_HEIGHT = 320;
+const MIN_PRIMARY_IMAGE_BYTES = 24 * 1024;
 
 const HTML_ENTITY_MAP = {
   "&quot;": '"',
@@ -628,13 +630,8 @@ function extractPreviewBundleFromHtml(htmlContent) {
 
 function extractPagePreviewUrlsFromDesignData(data) {
   const pages = Array.isArray(data && data.pages) ? data.pages : [];
-  if (!pages.length) {
-    return [];
-  }
-
   const pageUrls = [];
-
-  pages.forEach((page, pageIndex) => {
+  const addBestUrlFromPageLikeNode = (page, pageIndex, pathLabel) => {
     const candidates = [];
     const addCandidate = (rawUrl, hint, bonus = 0) => {
       const normalized = normalizeCandidateUrl(rawUrl);
@@ -647,7 +644,7 @@ function extractPagePreviewUrlsFromDesignData(data) {
         score:
           scoreCandidate(
             normalized,
-            `design_json.pages[${pageIndex}].${hint}`,
+            `design_json.${pathLabel}[${pageIndex}].${hint}`,
             "detail"
           ) + bonus,
       });
@@ -700,6 +697,20 @@ function extractPagePreviewUrlsFromDesignData(data) {
     if (bestCandidate && bestCandidate.url) {
       pageUrls.push(bestCandidate.url);
     }
+  };
+
+  pages.forEach((page, pageIndex) => {
+    addBestUrlFromPageLikeNode(page, pageIndex, "pages");
+  });
+
+  const layouts = Array.isArray(data && data.layouts) ? data.layouts : [];
+  layouts.forEach((layout, layoutIndex) => {
+    addBestUrlFromPageLikeNode(layout, layoutIndex, "layouts");
+
+    const normalizedLayoutImageUrl = normalizeCandidateUrl(layout && layout.imageUrl);
+    if (normalizedLayoutImageUrl) {
+      pageUrls.push(normalizedLayoutImageUrl);
+    }
   });
 
   return dedupeUrls(pageUrls);
@@ -707,7 +718,10 @@ function extractPagePreviewUrlsFromDesignData(data) {
 
 async function fetchDesignJsonPageUrls(designInfoUrl, options = {}) {
   if (!designInfoUrl) {
-    return [];
+    return {
+      pageUrls: [],
+      pageLikeCount: 0,
+    };
   }
 
   try {
@@ -722,15 +736,27 @@ async function fetchDesignJsonPageUrls(designInfoUrl, options = {}) {
     });
 
     if (response.status !== 200) {
-      return [];
+      return {
+        pageUrls: [],
+        pageLikeCount: 0,
+      };
     }
 
     const data =
       typeof response.data === "string" ? JSON.parse(response.data) : response.data;
 
-    return extractPagePreviewUrlsFromDesignData(data);
+    return {
+      pageUrls: extractPagePreviewUrlsFromDesignData(data),
+      pageLikeCount: Math.max(
+        Array.isArray(data && data.pages) ? data.pages.length : 0,
+        Array.isArray(data && data.layouts) ? data.layouts.length : 0
+      ),
+    };
   } catch {
-    return [];
+    return {
+      pageUrls: [],
+      pageLikeCount: 0,
+    };
   }
 }
 
@@ -1013,6 +1039,88 @@ async function validateGaodingImageUrl(imageUrl) {
   }
 }
 
+async function inspectGaodingImageAsset(imageUrl) {
+  const normalized = normalizeCandidateUrl(imageUrl);
+  if (!normalized) {
+    return null;
+  }
+
+  const requestHeaders = {
+    ...GAODING_HEADERS,
+    Accept: "image/*",
+  };
+
+  try {
+    const response = await axios.get(normalized, {
+      timeout: VALIDATE_TIMEOUT,
+      maxRedirects: 5,
+      responseType: "arraybuffer",
+      headers: {
+        ...requestHeaders,
+        Range: "bytes=0-65535",
+      },
+      validateStatus: () => true,
+    });
+
+    if (![200, 206].includes(response.status)) {
+      return null;
+    }
+
+    const contentType = String(
+      (response.headers && response.headers["content-type"]) || ""
+    ).toLowerCase();
+    if (contentType && !contentType.startsWith("image/")) {
+      return null;
+    }
+
+    let metadata = null;
+    try {
+      const sharp = require("sharp");
+      metadata = await sharp(Buffer.from(response.data)).metadata();
+    } catch {
+      metadata = null;
+    }
+
+    return {
+      url: normalized,
+      status: response.status,
+      contentType,
+      bytes:
+        Number(
+          (response.headers && response.headers["content-length"]) || 0
+        ) || Buffer.byteLength(Buffer.from(response.data || [])),
+      width: Number(metadata && metadata.width) || 0,
+      height: Number(metadata && metadata.height) || 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isLikelyPrimaryGaodingImage(assetInfo) {
+  if (!assetInfo) {
+    return false;
+  }
+
+  if (
+    Number(assetInfo.width) >= MIN_PRIMARY_IMAGE_WIDTH &&
+    Number(assetInfo.height) >= MIN_PRIMARY_IMAGE_HEIGHT
+  ) {
+    return true;
+  }
+
+  if (Number(assetInfo.bytes) >= MIN_PRIMARY_IMAGE_BYTES) {
+    return true;
+  }
+
+  return false;
+}
+
+async function validateGaodingPrimaryImageUrl(imageUrl) {
+  const assetInfo = await inspectGaodingImageAsset(imageUrl);
+  return Boolean(assetInfo && isLikelyPrimaryGaodingImage(assetInfo));
+}
+
 async function pickBestSingleCandidate(entries, linkType, limit = 12) {
   const candidatesByKey = new Map();
 
@@ -1063,11 +1171,73 @@ async function pickBestSingleCandidate(entries, linkType, limit = 12) {
   return null;
 }
 
+async function pickBestPrimarySingleCandidate(entries, linkType, limit = 12) {
+  const candidatesByKey = new Map();
+
+  for (const entry of entries || []) {
+    if (!Array.isArray(entry) || entry.length < 2) {
+      continue;
+    }
+
+    const [imageUrl, hint] = entry;
+    const normalized = normalizeCandidateUrl(imageUrl);
+    if (!normalized) {
+      continue;
+    }
+
+    const score = scoreCandidate(normalized, hint, linkType);
+    if (score <= 0) {
+      continue;
+    }
+
+    const key = candidateKey(normalized);
+    const existing = candidatesByKey.get(key);
+    if (existing && existing.score >= score) {
+      continue;
+    }
+
+    candidatesByKey.set(key, {
+      url: normalized,
+      hint,
+      score,
+    });
+  }
+
+  const orderedCandidates = Array.from(candidatesByKey.values()).sort(
+    (left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+      return String(left.url).localeCompare(String(right.url));
+    }
+  );
+
+  for (const candidate of orderedCandidates.slice(0, limit)) {
+    if (await validateGaodingPrimaryImageUrl(candidate.url)) {
+      return candidate.url;
+    }
+  }
+
+  return null;
+}
+
 async function validateUrlsInOrder(imageUrls) {
   const validUrls = [];
 
   for (const imageUrl of dedupeUrls(imageUrls)) {
     if (await validateGaodingImageUrl(imageUrl)) {
+      validUrls.push(imageUrl);
+    }
+  }
+
+  return validUrls;
+}
+
+async function validatePrimaryUrlsInOrder(imageUrls) {
+  const validUrls = [];
+
+  for (const imageUrl of dedupeUrls(imageUrls)) {
+    if (await validateGaodingPrimaryImageUrl(imageUrl)) {
       validUrls.push(imageUrl);
     }
   }
@@ -1215,7 +1385,7 @@ async function analyzeHtmlContent(htmlContent, originalUrl, linkType, stage) {
   const previewBundleEntries = extractPreviewBundleFromHtml(htmlContent);
 
   if (previewBundleEntries.length) {
-    const validUrls = await validateUrlsInOrder(
+    const validUrls = await validatePrimaryUrlsInOrder(
       previewBundleEntries.map(([imageUrl]) => imageUrl)
     );
     if (validUrls.length >= 2) {
@@ -1232,11 +1402,24 @@ async function analyzeHtmlContent(htmlContent, originalUrl, linkType, stage) {
         stage === "dynamic" ? 1800 : 1900
       );
     }
+
+    if (validUrls.length === 1) {
+      return buildResult(
+        validUrls,
+        originalUrl,
+        stage === "dynamic" ? "dynamic-html-preview" : "html-preview",
+        stage === "dynamic"
+          ? "browser_html_preview_single"
+          : "static_html_preview_single",
+        linkType,
+        stage === "dynamic" ? 1760 : 1860
+      );
+    }
   }
 
   const multiPageEntries = selectBestMultiPageGroup(jsonEntries);
   if (multiPageEntries.length) {
-    const validUrls = await validateUrlsInOrder(
+    const validUrls = await validatePrimaryUrlsInOrder(
       multiPageEntries.map(([imageUrl]) => imageUrl)
     );
     if (validUrls.length >= 2) {
@@ -1254,7 +1437,7 @@ async function analyzeHtmlContent(htmlContent, originalUrl, linkType, stage) {
   }
 
   if (metaEntries.length) {
-    const metaUrl = await pickBestSingleCandidate(metaEntries, linkType, 4);
+    const metaUrl = await pickBestPrimarySingleCandidate(metaEntries, linkType, 4);
     if (metaUrl) {
       return buildResult(
         [metaUrl],
@@ -1267,7 +1450,7 @@ async function analyzeHtmlContent(htmlContent, originalUrl, linkType, stage) {
     }
   }
 
-  const bestUrl = await pickBestSingleCandidate(
+  const bestUrl = await pickBestPrimarySingleCandidate(
     metaEntries.concat(jsonEntries, domEntries, textEntries),
     linkType
   );
@@ -1313,7 +1496,8 @@ async function staticScraping(url, linkType, options = {}) {
     }
 
     const designInfoUrl = extractDesignInfoUrlFromHtml(htmlContent);
-    const designJsonPageUrls = await fetchDesignJsonPageUrls(designInfoUrl, options);
+    const { pageUrls: designJsonPageUrls, pageLikeCount } =
+      await fetchDesignJsonPageUrls(designInfoUrl, options);
     const designJsonResult =
       designJsonPageUrls.length >= 2
         ? buildResult(
@@ -1325,8 +1509,39 @@ async function staticScraping(url, linkType, options = {}) {
             1500
           )
         : null;
+    const preferredStaticResult = selectPreferredResult(
+      htmlResult,
+      designJsonResult,
+      linkType
+    );
 
-    return selectPreferredResult(htmlResult, designJsonResult, linkType);
+    if (
+      preferredStaticResult ||
+      !htmlResult ||
+      !designInfoUrl ||
+      pageLikeCount !== 1
+    ) {
+      return preferredStaticResult;
+    }
+
+    const htmlPrimaryUrl = await validatePrimaryUrlsInOrder([
+      htmlResult.imageUrl,
+      htmlResult.thumbnailUrl,
+      ...(Array.isArray(htmlResult.imageUrls) ? htmlResult.imageUrls : []),
+    ]);
+
+    if (!htmlPrimaryUrl.length) {
+      return preferredStaticResult;
+    }
+
+    return buildResult(
+      [htmlPrimaryUrl[0]],
+      url,
+      "design-json-single-page",
+      "static_design_json_single_page",
+      linkType,
+      Math.max(Number(htmlResult.score || 0), 1680)
+    );
   } catch {
     return null;
   }
@@ -1347,11 +1562,9 @@ async function dynamicScraping(url, linkType, options = {}) {
       ],
     };
 
-    if (executablePath) {
-      launchOptions.executablePath = executablePath;
-    }
-
-    browser = await puppeteer.launch(launchOptions);
+    browser = await puppeteer.launch(
+      withPuppeteerExecutablePath(launchOptions)
+    );
     page = await browser.newPage();
     const responseTasks = [];
     const networkStructuredEntries = [];
@@ -1525,7 +1738,7 @@ async function dynamicScraping(url, linkType, options = {}) {
     const looseNetworkEntries = dedupeEntries(networkLooseEntries);
 
     if (previewBundleNetworkEntries.length) {
-      const validUrls = await validateUrlsInOrder(
+      const validUrls = await validatePrimaryUrlsInOrder(
         previewBundleNetworkEntries.map(([imageUrl]) => imageUrl)
       );
       if (validUrls.length >= 2) {
@@ -1543,7 +1756,7 @@ async function dynamicScraping(url, linkType, options = {}) {
     if (!supplementalResult && structuredNetworkEntries.length) {
       const groupedEntries = selectBestMultiPageGroup(structuredNetworkEntries);
       if (groupedEntries.length) {
-        const validUrls = await validateUrlsInOrder(
+        const validUrls = await validatePrimaryUrlsInOrder(
           groupedEntries.map(([imageUrl]) => imageUrl)
         );
         if (validUrls.length >= 2) {
@@ -1568,7 +1781,7 @@ async function dynamicScraping(url, linkType, options = {}) {
       return preferredDynamicResult;
     }
 
-    const bestVisibleUrl = await pickBestSingleCandidate(
+    const bestVisibleUrl = await pickBestPrimarySingleCandidate(
       structuredNetworkEntries.concat(looseNetworkEntries, visibleEntries),
       linkType,
       8

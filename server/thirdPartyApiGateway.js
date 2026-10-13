@@ -5,6 +5,18 @@
 
 const axios = require("axios");
 const qs = require("querystring");
+const { redact } = require("./extractors/818ps-pages");
+function classifyRequestError(error) {
+  const code = String(error.code || "");
+  if (/CERT|TLS|SSL|SELF_SIGNED|VERIFY_LEAF/.test(code)) return "certificate";
+  if (/ENOTFOUND|EAI_AGAIN/.test(code)) return "dns";
+  if (/TIME|ABORT/.test(code)) return "timeout";
+  if (error.response) return `http_${error.response.status}`;
+  return "connection";
+}
+function isTransientError(error) {
+  return ["timeout", "connection"].includes(classifyRequestError(error)) || error.code === "EAI_AGAIN" || error.response?.status === 429 || error.response?.status >= 500;
+}
 
 // ====== API 提供商配置 ======
 
@@ -48,6 +60,7 @@ async function retryRequest(fn, attempts = 3, delayMs = 500) {
       return await fn();
     } catch (error) {
       lastError = error;
+      if (!isTransientError(error)) throw error;
       if (i < attempts - 1) {
         console.warn(
           `  ⚠️ 重试 ${i + 1}/${attempts - 1}，等待 ${delayMs}ms...`
@@ -99,7 +112,7 @@ async function callTSGPT(targetUrl) {
     if (data && (data.image || data.imageUrl || data.url)) {
       const imageUrl = data.image || data.imageUrl || data.url;
       console.log(
-        `  ✅ ${TSGPT_API.name} 返回图片: ${imageUrl.substring(0, 80)}`
+        `  ✅ ${TSGPT_API.name} 返回图片: ${redact(imageUrl)}`
       );
       return {
         success: true,
@@ -109,7 +122,8 @@ async function callTSGPT(targetUrl) {
       };
     }
   } catch (error) {
-    console.warn(`  ❌ ${TSGPT_API.name} GET 请求失败: ${error.message}`);
+    console.warn(`  ❌ ${TSGPT_API.name} GET 请求失败: ${classifyRequestError(error)} (${error.code || error.response?.status || "unknown"})`);
+    if (classifyRequestError(error) === "certificate") return null;
   }
   // GET 失败再 POST
   try {
@@ -133,7 +147,7 @@ async function callTSGPT(targetUrl) {
     if (data && (data.image || data.imageUrl || data.url)) {
       const imageUrl = data.image || data.imageUrl || data.url;
       console.log(
-        `  ✅ ${TSGPT_API.name} 返回图片 (POST): ${imageUrl.substring(0, 80)}`
+        `  ✅ ${TSGPT_API.name} 返回图片 (POST): ${redact(imageUrl)}`
       );
       return {
         success: true,
@@ -143,7 +157,7 @@ async function callTSGPT(targetUrl) {
       };
     }
   } catch (error) {
-    console.warn(`  ❌ ${TSGPT_API.name} POST 请求失败: ${error.message}`);
+    console.warn(`  ❌ ${TSGPT_API.name} POST 请求失败: ${classifyRequestError(error)} (${error.code || error.response?.status || "unknown"})`);
   }
 
   return null;
@@ -242,7 +256,7 @@ async function callCustomAPI(targetUrl) {
  */
 async function extractViaThirdPartyAPI(targetUrl, platform = "unknown") {
   console.log(`\n🌐 启动第三方 API 网关，平台: ${platform}`);
-  console.log(`   目标 URL: ${targetUrl.substring(0, 100)}`);
+  console.log(`   目标 URL: ${redact(targetUrl)}`);
 
   // API 优先级列表（按 priority 排序）
   const apiCandidates = [
@@ -285,6 +299,7 @@ const CACHE_TTL = 3600000; // 1 小时
  * 带缓存的提取函数
  */
 async function extractViaThirdPartyAPIWithCache(targetUrl, platform) {
+  if (/818ps|tuguaishou/i.test(`${platform}:${targetUrl}`)) return extractViaThirdPartyAPI(targetUrl, platform);
   const cacheKey = `${platform}:${targetUrl}`;
 
   // 检查缓存
@@ -328,4 +343,6 @@ module.exports = {
   // 导出配置，供测试或动态修改
   TSGPT_API,
   OTHER_APIS,
+  classifyRequestError,
+  retryRequest,
 };

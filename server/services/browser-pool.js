@@ -10,6 +10,10 @@
 
 const puppeteer = require("puppeteer-extra");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+const {
+  getPuppeteerExecutablePath,
+  withPuppeteerExecutablePath,
+} = require("../utils/puppeteer-launch");
 
 puppeteer.use(StealthPlugin());
 
@@ -20,6 +24,7 @@ class BrowserPool {
     this.instances = []; // 实例池
     this.waiting = []; // 等待队列
     this.inUse = new Set(); // 正在使用的实例
+    this.creating = 0;
     this.launchOptions = options.launchOptions || {};
     this.initialized = false;
 
@@ -43,6 +48,11 @@ class BrowserPool {
         console.log(`  ✅ 创建实例 ${i + 1}/${this.minInstances}`);
       } catch (error) {
         console.error(`  ❌ 创建实例失败: ${error.message}`);
+        const executablePath =
+          getPuppeteerExecutablePath() || this.launchOptions.executablePath;
+        if (executablePath) {
+          console.error(`  Chromium executablePath: ${executablePath}`);
+        }
       }
     }
 
@@ -55,19 +65,21 @@ class BrowserPool {
    * @private
    */
   async _createBrowser() {
-    const browser = await puppeteer.launch({
-      headless: "new",
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-extensions",
-      ],
-      ...this.launchOptions,
-    });
+    const browser = await puppeteer.launch(
+      withPuppeteerExecutablePath({
+        headless: "new",
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-gpu",
+          "--no-first-run",
+          "--no-default-browser-check",
+          "--disable-extensions",
+        ],
+        ...this.launchOptions,
+      })
+    );
 
     return browser;
   }
@@ -76,7 +88,7 @@ class BrowserPool {
    * 获取一个浏览器实例
    * 如果没有可用实例且未达上限，则创建新实例
    */
-  async acquire() {
+  async acquire(timeoutMs = 10000) {
     // 如果有可用实例，直接返回
     if (this.instances.length > 0) {
       const browser = this.instances.pop();
@@ -88,7 +100,8 @@ class BrowserPool {
     }
 
     // 如果未达上限，创建新实例
-    if (this.inUse.size < this.maxInstances) {
+    if (this.inUse.size + this.creating < this.maxInstances) {
+      this.creating += 1;
       try {
         console.log(
           `⚙️ 创建新浏览器实例 (当前使用中: ${this.inUse.size}/${this.maxInstances})`
@@ -99,6 +112,8 @@ class BrowserPool {
       } catch (error) {
         console.error(`❌ 创建新实例失败: ${error.message}`);
         throw error;
+      } finally {
+        this.creating -= 1;
       }
     }
 
@@ -106,8 +121,13 @@ class BrowserPool {
     console.log(
       `⏳ 等待可用实例 (使用中: ${this.inUse.size}/${this.maxInstances})`
     );
-    return new Promise((resolve) => {
-      this.waiting.push(resolve);
+    return new Promise((resolve, reject) => {
+      const waiter = (browser) => { clearTimeout(timer); resolve(browser); };
+      const timer = setTimeout(() => {
+        this.waiting = this.waiting.filter(item => item !== waiter);
+        reject(new Error("browser_pool_acquire_timeout"));
+      }, timeoutMs);
+      this.waiting.push(waiter);
     });
   }
 
@@ -115,6 +135,7 @@ class BrowserPool {
    * 归还浏览器实例
    */
   release(browser) {
+    if (!this.inUse.has(browser)) return;
     this.inUse.delete(browser);
 
     // 如果有等待的请求，分配给它

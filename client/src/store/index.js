@@ -1,9 +1,26 @@
 import { createStore } from "vuex";
 import axios from "axios";
+import { API_BASE_URL } from "../utils/api";
 import { toClientImageUrl } from "../utils/imageProxy";
+import { getClientId } from "../utils/clientId";
 
 const api = axios.create({
-  baseURL: "/api",
+  baseURL: API_BASE_URL,
+});
+
+api.interceptors.request.use((config) => {
+  const clientId = getClientId();
+  config.headers = config.headers || {};
+  config.headers["X-Client-Id"] = clientId;
+
+  if (config.method?.toLowerCase() === "get") {
+    config.params = {
+      ...(config.params || {}),
+      clientId,
+    };
+  }
+
+  return config;
 });
 
 function parseJsonField(value, fallback = []) {
@@ -216,6 +233,7 @@ export default createStore({
           pageCount,
           isMultiPage,
           status: normalizeRecordStatus(status),
+          clientId: getClientId(),
         });
 
         if (data.success) {

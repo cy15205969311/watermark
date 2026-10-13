@@ -1,25 +1,26 @@
 @echo off
 echo ========================================
-echo 去水印下载助手 - 启动脚本
+echo Watermark helper startup
 echo ========================================
 echo.
 
-echo [1/2] 启动后端服务器...
+echo [1/2] Starting backend server...
 cd server
 start cmd /k "npm start"
 cd ..
 
 timeout /t 3 /nobreak >nul
 
-echo [2/2] 启动前端开发服务器...
+echo [2/2] Starting frontend dev server...
 cd client
 start cmd /k "npm run dev"
 cd ..
 
 echo.
 echo ========================================
-echo 启动完成！
-echo 后端: http://localhost:3000
-echo 前端: http://localhost:5173
+echo Start complete
+echo Local backend:   http://localhost:3000
+echo Local frontend:  http://localhost:5173
+echo LAN access: check the server and Vite windows for the Network URL
 echo ========================================
 pause

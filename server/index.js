@@ -19,9 +19,11 @@ const mysql = require("mysql2/promise");
 const cors = require("cors");
 const axios = require("axios");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const dotenv = require("dotenv");
 const { extractImage } = require("./imageExtractor");
+const { normalizeExtractPayload, extractionDetails, restoreRecord } = require("./utils/extractPayload");
 const {
   initDefaultPool,
   closeDefaultPool,
@@ -68,6 +70,38 @@ const loadedEnvFiles = loadServerEnvFiles();
 
 const app = express();
 let PORT = parseInt(process.env.PORT || 3000);
+const HOST = String(process.env.HOST || "0.0.0.0").trim() || "0.0.0.0";
+app.set("trust proxy", true);
+
+function getServerAccessUrls(host, port) {
+  const normalizedHost = String(host || "").trim();
+  if (
+    normalizedHost &&
+    normalizedHost !== "0.0.0.0" &&
+    normalizedHost !== "::"
+  ) {
+    const formattedHost =
+      normalizedHost.includes(":") && !normalizedHost.startsWith("[")
+        ? `[${normalizedHost}]`
+        : normalizedHost;
+    return [`http://${formattedHost}:${port}`];
+  }
+
+  const urls = new Set([`http://localhost:${port}`, `http://127.0.0.1:${port}`]);
+  const networkInterfaces = os.networkInterfaces();
+
+  Object.values(networkInterfaces).forEach((entries) => {
+    (entries || []).forEach((details) => {
+      if (!details || details.family !== "IPv4" || details.internal) {
+        return;
+      }
+
+      urls.add(`http://${details.address}:${port}`);
+    });
+  });
+
+  return Array.from(urls);
+}
 
 // 中间件 - 增强 CORS 配置
 app.use(
@@ -488,8 +522,20 @@ ensureParseRecordColumns().catch((err) => {
 });
 
 initDefaultPool()
-  .then(() => {
-    console.log("✅ 浏览器池初始化成功，已预热 Puppeteer 实例");
+  .then((browserPool) => {
+    const status =
+      browserPool && typeof browserPool.getStatus === "function"
+        ? browserPool.getStatus()
+        : null;
+
+    if (status && status.available > 0) {
+      console.log("✅ 浏览器池初始化成功，已预热 Puppeteer 实例");
+      return;
+    }
+
+    console.warn(
+      "⚠️ 浏览器池已初始化但没有可用实例，请检查 PUPPETEER_EXECUTABLE_PATH 或系统依赖库"
+    );
   })
   .catch((err) => {
     console.warn(
@@ -504,6 +550,8 @@ initDefaultPool()
 function resolvePlatform(url, platform) {
   const normalizedPlatform =
     typeof platform === "string" ? platform.trim() : "";
+
+  if (/^(818ps(?:\.com)?|tuguaishou(?:\.com)?|图怪兽)$/i.test(normalizedPlatform)) return "818ps";
 
   if (normalizedPlatform && normalizedPlatform !== "Unknown") {
     return normalizedPlatform;
@@ -555,100 +603,45 @@ function normalizeRecordStatus(status) {
   return "success";
 }
 
-function normalizeExtractPayload(result = {}) {
-  const urls = [];
-  const pages = [];
-  const seen = new Set();
-
-  const isBlockedPreviewAssetUrl = (value) => {
-    if (typeof value !== "string") {
-      return true;
-    }
-
-    const normalized = value.trim().toLowerCase();
-    if (!normalized) {
-      return true;
-    }
-
-    if (/^data:image\//.test(normalized) || /^blob:/.test(normalized)) {
-      return false;
-    }
-
-    if (/^https?:\/\/hm\.baidu\.com\/hm\.gif/.test(normalized)) return true;
-    if (/googletagmanager|google-analytics|doubleclick|umeng|clarity/.test(normalized)) {
-      return true;
-    }
-    if (/\/distheadless\/img\//.test(normalized)) return true;
-    if (/full-screen|fullscreen|favicon|tracker|tracking|pixel/.test(normalized)) {
-      return true;
-    }
-
-    return false;
-  };
-
-  const addUrl = (value) => {
-    if (typeof value !== "string") {
-      return null;
-    }
-
-    const normalized = value.trim();
-    if (!normalized || isBlockedPreviewAssetUrl(normalized) || seen.has(normalized)) {
-      return null;
-    }
-
-    seen.add(normalized);
-    urls.push(normalized);
-    return normalized;
-  };
-
-  const addPage = (page, fallbackPageNumber) => {
-    const imageUrl = addUrl(page && page.imageUrl);
-    if (!imageUrl) {
-      return;
-    }
-
-    pages.push({
-      page: Number(page && page.page) || fallbackPageNumber || pages.length + 1,
-      imageUrl,
-    });
-  };
-
-  (result.pages || []).forEach((page, index) => addPage(page, index + 1));
-  (result.imageUrls || []).forEach(addUrl);
-  (result.images || []).forEach(addUrl);
-  addUrl(result.imageUrl);
-  addUrl(result.thumbnailUrl);
-
-  if (!pages.length) {
-    urls.forEach((imageUrl, index) => {
-      pages.push({
-        page: index + 1,
-        imageUrl,
-      });
-    });
+function normalizeClientId(value) {
+  if (typeof value !== "string") {
+    return "";
   }
 
-  return {
-    ...result,
-    imageUrl: urls[0] || null,
-    thumbnailUrl: result.thumbnailUrl || result.imageUrl || urls[0] || null,
-    imageUrls: urls,
-    images: urls,
-    pages,
-    pageCount: Number(result.pageCount) || pages.length || urls.length,
-    isMultiPage:
-      typeof result.isMultiPage === "boolean"
-        ? result.isMultiPage
-        : urls.length > 1,
-  };
+  return value.trim().slice(0, 128);
+}
+
+function getRequestClientId(req) {
+  return normalizeClientId(
+    req.get("x-client-id") ||
+      req.query.clientId ||
+      req.body?.clientId ||
+      ""
+  );
+}
+
+function getRequestClientIp(req) {
+  const forwardedFor = String(req.get("x-forwarded-for") || "").trim();
+  if (forwardedFor) {
+    return forwardedFor.split(",")[0].trim().slice(0, 64);
+  }
+
+  return String(
+    req.ip || req.socket?.remoteAddress || req.connection?.remoteAddress || ""
+  )
+    .trim()
+    .slice(0, 64);
 }
 
 async function ensureParseRecordColumns() {
   const requiredColumns = {
     image_urls_json: "LONGTEXT NULL",
     pages_json: "LONGTEXT NULL",
+    extraction_metadata_json: "LONGTEXT NULL",
     page_count: "INT NULL DEFAULT 1",
     is_multi_page: "TINYINT(1) NOT NULL DEFAULT 0",
+    client_id: "VARCHAR(128) NULL",
+    client_ip: "VARCHAR(64) NULL",
   };
 
   for (const [columnName, definition] of Object.entries(requiredColumns)) {
@@ -688,10 +681,16 @@ async function ensureParseRecordColumns() {
 
 app.get("/api/history", async (req, res) => {
   try {
+    const clientId = getRequestClientId(req);
+    if (!clientId) {
+      return res.status(400).json({ success: false, message: "Missing client id" });
+    }
+
     const [rows] = await pool.query(
-      "SELECT * FROM parse_records ORDER BY created_at DESC LIMIT 50"
+      "SELECT * FROM parse_records WHERE client_id = ? ORDER BY created_at DESC LIMIT 50",
+      [clientId]
     );
-    res.json({ success: true, data: rows });
+    res.json({ success: true, data: rows.map(restoreRecord) });
   } catch (error) {
     console.error(error);
     res.status(500).json({ success: false, message: "数据库错误" });
@@ -712,6 +711,13 @@ app.post("/api/parse", async (req, res) => {
     status = "success",
   } = req.body;
 
+  const clientId = normalizeClientId(getRequestClientId(req));
+  const clientIp = getRequestClientIp(req);
+
+  if (!clientId) {
+    return res.status(400).json({ success: false, message: "Missing client id" });
+  }
+
   if (!url) {
     return res.status(400).json({ success: false, message: "URL 不能为空" });
   }
@@ -729,6 +735,7 @@ app.post("/api/parse", async (req, res) => {
     const resolvedPlatform = resolvePlatform(url, platform);
     const normalizedStatus = normalizeRecordStatus(status);
     const normalizedPayload = normalizeExtractPayload({
+      ...extractionDetails(req.body),
       thumbnailUrl,
       imageUrl,
       imageUrls,
@@ -746,26 +753,32 @@ app.post("/api/parse", async (req, res) => {
         : finalImageUrls.length > 1;
 
     const [result] = await pool.query(
-      "INSERT INTO parse_records (original_url, platform, thumbnail_url, status, image_urls_json, pages_json, page_count, is_multi_page) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO parse_records (original_url, platform, client_id, client_ip, thumbnail_url, status, image_urls_json, pages_json, page_count, is_multi_page, extraction_metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [
         url,
         resolvedPlatform,
+        clientId,
+        clientIp,
         finalThumbnailUrl,
         normalizedStatus,
         JSON.stringify(finalImageUrls),
         JSON.stringify(finalPages),
         finalPageCount,
         finalIsMultiPage ? 1 : 0,
+        JSON.stringify(extractionDetails(normalizedPayload)),
       ]
     );
 
     res.json({
       success: true,
       data: {
+        ...extractionDetails(normalizedPayload),
         id: result.insertId,
         originalUrl: url,
         original_url: url,
         platform: resolvedPlatform,
+        clientId,
+        client_ip: clientIp,
         thumbnailUrl: finalThumbnailUrl,
         thumbnail_url: finalThumbnailUrl,
         imageUrl: normalizedPayload.imageUrl || finalThumbnailUrl || null,
@@ -791,7 +804,15 @@ app.post("/api/parse", async (req, res) => {
 // 3. 删除记录
 app.delete("/api/history/:id", async (req, res) => {
   try {
-    await pool.query("DELETE FROM parse_records WHERE id = ?", [req.params.id]);
+    const clientId = getRequestClientId(req);
+    if (!clientId) {
+      return res.status(400).json({ success: false, message: "Missing client id" });
+    }
+
+    await pool.query("DELETE FROM parse_records WHERE id = ? AND client_id = ?", [
+      req.params.id,
+      clientId,
+    ]);
     res.json({ success: true, message: "记录已删除" });
   } catch (error) {
     res.status(500).json({ success: false, message: "数据库错误" });
@@ -802,11 +823,16 @@ app.delete("/api/history/:id", async (req, res) => {
 app.get("/api/history/search", async (req, res) => {
   const { query } = req.query;
   try {
+    const clientId = getRequestClientId(req);
+    if (!clientId) {
+      return res.status(400).json({ success: false, message: "Missing client id" });
+    }
+
     const [rows] = await pool.query(
-      "SELECT * FROM parse_records WHERE original_url LIKE ? OR platform LIKE ? ORDER BY created_at DESC",
-      [`%${query}%`, `%${query}%`]
+      "SELECT * FROM parse_records WHERE client_id = ? AND (original_url LIKE ? OR platform LIKE ?) ORDER BY created_at DESC",
+      [clientId, `%${query}%`, `%${query}%`]
     );
-    res.json({ success: true, data: rows });
+    res.json({ success: true, data: rows.map(restoreRecord) });
   } catch (error) {
     res.status(500).json({ success: false, message: "搜索失败" });
   }
@@ -848,9 +874,8 @@ app.post("/api/extract-image", async (req, res) => {
 
     // 使用图片提取服务（架构级优化：优先第三方 API）
     console.log(`[${requestId}] 🔍 调用 extractImage 服务...`);
-    console.log(`[${requestId}] 🔍 调用 extractImage 服务...`);
     const result = normalizeExtractPayload(
-      await extractImage(url, resolvedPlatform)
+      await extractImage(url, resolvedPlatform, { requestId })
     );
 
     console.log(
@@ -859,7 +884,9 @@ app.post("/api/extract-image", async (req, res) => {
 
     // 确保向客户端返回统一结构，并包含 textLayers（如果存在）
     const payload = {
-      success: true,
+      ...extractionDetails(result),
+      requestId,
+      success: result.success !== false,
       imageUrl: result.imageUrl || null,
       thumbnailUrl: result.thumbnailUrl || result.imageUrl || null,
       imageUrls: result.imageUrls || [],
@@ -899,9 +926,24 @@ app.post("/api/extract-image", async (req, res) => {
 
 // 启动服务器，支持端口自动递增（解决 EADDRINUSE）
 function startServer(port) {
-  const server = app.listen(port, () => {
-    console.log(`\n🚀 服务器运行在 http://localhost:${port}`);
-    console.log(`📡 API 地址: http://localhost:${port}/api`);
+  const server = app.listen(port, HOST, () => {
+    const accessUrls = getServerAccessUrls(HOST, port);
+    const localUrls = accessUrls.filter(
+      (url) => url.includes("localhost") || url.includes("127.0.0.1")
+    );
+    const lanUrls = accessUrls.filter(
+      (url) => !url.includes("localhost") && !url.includes("127.0.0.1")
+    );
+
+    console.log(`\n🚀 服务器监听地址: ${HOST}:${port}`);
+    localUrls.forEach((url) => {
+      console.log(`🏠 本机访问: ${url}`);
+      console.log(`📡 本机 API: ${url}/api`);
+    });
+    lanUrls.forEach((url) => {
+      console.log(`🌐 局域网访问: ${url}`);
+      console.log(`📡 局域网 API: ${url}/api`);
+    });
     console.log(`\n✅ 服务已启动，等待请求...\n`);
   });
 

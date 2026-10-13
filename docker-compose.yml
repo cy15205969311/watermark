@@ -1,0 +1,65 @@
+services:
+  db:
+    image: mysql:8.0
+    container_name: watermark-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: ${DB_NAME:-watermark_remover}
+      MYSQL_USER: ${DB_USER:-watermark_user}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-change_me}
+    command:
+      - --default-authentication-plugin=mysql_native_password
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./database/update-status-field.sql:/docker-entrypoint-initdb.d/02-update-status-field.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${DB_ROOT_PASSWORD:-root}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
+    container_name: watermark-server
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DB_HOST: db
+      DB_USER: ${DB_USER:-watermark_user}
+      DB_PASSWORD: ${DB_PASSWORD:-change_me}
+      DB_NAME: ${DB_NAME:-watermark_remover}
+      PORT: 3000
+      DOMAIN: ${DOMAIN:-localhost}
+      PUPPETEER_EXECUTABLE_PATH: /usr/bin/chromium
+    volumes:
+      - uploads_data:/app/uploads
+    expose:
+      - "3000"
+    ports:
+      - "3000:3000"
+
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
+    container_name: watermark-client
+    restart: unless-stopped
+    depends_on:
+      - server
+    ports:
+      - "80:80"
+
+volumes:
+  db_data:
+  uploads_data:

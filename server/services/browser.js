@@ -1,10 +1,13 @@
 // server/services/browser.js
 const puppeteer = require("puppeteer-extra");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+const { withPuppeteerExecutablePath } = require("../utils/puppeteer-launch");
 
 puppeteer.use(StealthPlugin());
 
-const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+function launchBrowser(launchOptions) {
+  return puppeteer.launch(withPuppeteerExecutablePath(launchOptions));
+}
 
 async function scrapeWithBrowser(targetUrl) {
   let browser;
@@ -17,10 +20,7 @@ async function scrapeWithBrowser(targetUrl) {
         "--disable-dev-shm-usage",
       ],
     };
-    if (executablePath) {
-      launchOptions.executablePath = executablePath;
-    }
-    browser = await puppeteer.launch(launchOptions);
+    browser = await launchBrowser(launchOptions);
 
     const page = await browser.newPage();
     // 伪装视口
@@ -219,8 +219,7 @@ async function scrape818ps(url) {
         "--disable-dev-shm-usage",
       ],
     };
-    if (executablePath) launchOptions.executablePath = executablePath;
-    browser = await puppeteer.launch(launchOptions);
+    browser = await launchBrowser(launchOptions);
     const page = await browser.newPage();
     await page.setViewport({ width: 1920, height: 1080, deviceScaleFactor: 2 });
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
@@ -611,8 +610,7 @@ async function scrapeCanva(url) {
         "--disable-dev-shm-usage",
       ],
     };
-    if (executablePath) launchOptions.executablePath = executablePath;
-    browser = await puppeteer.launch(launchOptions);
+    browser = await launchBrowser(launchOptions);
     const page = await browser.newPage();
     await page.setViewport({ width: 1920, height: 1080, deviceScaleFactor: 2 });
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
@@ -810,11 +808,7 @@ async function scrapeChuangkitEnhanced(pageUrl) {
         "--disable-features=VizDisplayCompositor",
       ],
     };
-    if (executablePath) {
-      launchOptions.executablePath = executablePath;
-    }
-
-    browser = await puppeteer.launch(launchOptions);
+    browser = await launchBrowser(launchOptions);
 
     const page = await browser.newPage();
     await page.setViewport({ width: 1920, height: 1080, deviceScaleFactor: 2 });
@@ -1884,7 +1878,7 @@ async function scrapeChuangkit(pageUrl) {
   try {
     console.log("🧩 开始创客贴精确设计稿抓取:", pageUrl);
 
-    browser = await puppeteer.launch({
+    browser = await launchBrowser({
       headless: "new",
       args: [
         "--no-sandbox",

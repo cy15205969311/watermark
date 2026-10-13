@@ -10,6 +10,7 @@
  */
 
 const puppeteer = require('puppeteer');
+const { withPuppeteerExecutablePath } = require('./puppeteer-launch');
 
 /**
  * 浏览器池配置
@@ -66,7 +67,9 @@ class BrowserPool {
    */
   async createBrowser() {
     try {
-      const browser = await puppeteer.launch(this.config.launchOptions);
+      const browser = await puppeteer.launch(
+        withPuppeteerExecutablePath(this.config.launchOptions)
+      );
 
       const browserInfo = {
         browser,

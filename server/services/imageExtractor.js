@@ -13,6 +13,7 @@
 
 const puppeteer = require('puppeteer');
 const { autoScroll } = require('../utils/autoScroll');
+const { withPuppeteerExecutablePath } = require('../utils/puppeteer-launch');
 
 /**
  * 图片过滤规则
@@ -272,15 +273,17 @@ async function extractImages(url, options = {}) {
   try {
     // 1. 启动浏览器
     console.log('  🌐 启动浏览器...');
-    browser = await puppeteer.launch({
-      headless: config.headless ? 'new' : false,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled'
-      ]
-    });
+    browser = await puppeteer.launch(
+      withPuppeteerExecutablePath({
+        headless: config.headless ? 'new' : false,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-blink-features=AutomationControlled'
+        ]
+      })
+    );
 
     const page = await browser.newPage();
 

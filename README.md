@@ -210,6 +210,72 @@ npm run dev
 
 前端开发环境已通过 `client/vite.config.js` 代理 `/api` 到 `http://localhost:3000`。
 
+### 6. 使用 Docker 部署
+
+项目根目录已提供：
+
+- `docker-compose.yml`
+- `Dockerfile.server`
+- `Dockerfile.client`
+- `.env.docker`
+
+推荐在 Ubuntu 服务器上按下面顺序执行。
+
+1. 配置 Docker 镜像加速（阿里云）：
+
+```bash
+sudo mkdir -p /etc/docker
+sudo tee /etc/docker/daemon.json >/dev/null <<'EOF'
+{
+  "registry-mirrors": ["https://a8ivtlxk.mirror.aliyuncs.com"]
+}
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+docker info | grep -A 5 "Registry Mirrors"
+```
+
+2. 初始化项目环境变量：
+
+```bash
+cp .env.docker .env
+```
+
+3. 修改根目录 `.env` 中的关键配置：
+
+- `DOMAIN`
+- `DB_PASSWORD`
+- `DB_ROOT_PASSWORD`
+- `NPM_REGISTRY`（默认已经是 `https://registry.npmmirror.com`，一般可直接保留）
+
+4. 分步构建并启动：
+
+```bash
+docker compose build server
+docker compose build client
+docker compose up -d
+```
+
+常用命令：
+
+```bash
+docker compose ps
+docker compose logs -f server
+docker compose logs -f client
+docker compose logs -f db
+docker compose down
+```
+
+说明：
+
+- 前端容器默认监听宿主机 `80`
+- 后端容器默认监听宿主机 `3000`
+- MySQL 数据保存在 Docker volume `db_data`
+- 上传与处理后的图片保存在 Docker volume `uploads_data`
+- Puppeteer 在容器内使用系统 Chromium，已内置所需路径配置
+- `server` 首次构建通常最慢，因为需要安装系统 Chromium；只要这一层没有变化，后续会命中 Docker 缓存
+- Docker 基础镜像走阿里云 `registry-mirrors`，Node 依赖安装走 `NPM_REGISTRY`
+
 ## 主要接口
 
 ### 1. 提取在线图片

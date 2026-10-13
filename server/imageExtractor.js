@@ -408,12 +408,13 @@ async function collectValidatedChuangkitCandidates(candidates, options = {}) {
   return results;
 }
 
-async function extract818psImage(url) {
+async function extract818psImage(url, options = {}) {
   try {
     try {
       const optimizedResult = await extract818ps(url, {
         timeout: 15000,
         headless: true,
+        ...options,
       });
 
       if (optimizedResult && optimizedResult.success && optimizedResult.imageUrl) {
@@ -1529,7 +1530,7 @@ async function extractHuabanImage(url) {
   }
 }
 
-async function extractImage(url, platform) {
+async function extractImage(url, platform, options = {}) {
   console.log("\n=".repeat(60));
   console.log("🚀 开始提取图片");
   console.log(`   平台: ${platform}`);
@@ -1537,6 +1538,7 @@ async function extractImage(url, platform) {
   console.log("=".repeat(60));
   const shouldPreferLocalChuangkit = isChuangkitTarget(url, platform);
   const shouldUseHuabanLocalOnly = isHuabanTarget(url, platform);
+  const shouldPreferLocal818ps = /818ps|tuguaishou/i.test(platform || "") || /(?:818ps|tuguaishou)\.com/i.test(url);
   let thirdPartyFallback = null;
 
   try {
@@ -1583,8 +1585,9 @@ async function extractImage(url, platform) {
             };
 
         if (
-          !shouldPreferLocalChuangkit ||
-          normalizedThirdPartyResult.imageUrls.length > 1
+          (!shouldPreferLocal818ps && !shouldPreferLocalChuangkit) ||
+          (!shouldPreferLocal818ps &&
+          normalizedThirdPartyResult.imageUrls.length > 1)
         ) {
           return normalizedThirdPartyResult;
         }
@@ -1608,7 +1611,7 @@ async function extractImage(url, platform) {
         url.includes("818ps.com") ||
         url.includes("tuguaishou.com")
       ) {
-        result = await extract818psImage(url);
+        result = await extract818psImage(url, options);
       } else if (
         platform === "Gaoding" ||
         platform === "稿定设计" ||
@@ -1653,7 +1656,15 @@ async function extractImage(url, platform) {
     console.log("❌ 所有主要方案都失败，无法获取真实图片URL");
     if (thirdPartyFallback) {
       console.log("\nℹ️ 创客贴本地套图未命中，回退第三方单图结果...\n");
-      return thirdPartyFallback;
+      return shouldPreferLocal818ps
+        ? await require("./extractors/818ps")._test.mergeStageResults([
+            await (async () => {
+              const imageUrl = thirdPartyFallback.imageUrl;
+              const valid = await require("./extractors/818ps").validateImageUrl(imageUrl);
+              return { source: "thirdparty_fallback", candidates: valid ? [{ imageUrl, source: "thirdparty_fallback", role: "page_preview", validationStatus: "valid", pageNumber: null }] : [], evidence: [] };
+            })(),
+          ])
+        : thirdPartyFallback;
     }
 
     console.log("\n" + "=".repeat(60) + "\n");

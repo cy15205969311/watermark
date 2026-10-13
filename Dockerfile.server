@@ -1,0 +1,31 @@
+FROM node:18-slim
+
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+
+# 安装 Puppeteer / Sharp 所需依赖与系统 Chromium
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y \
+    chromium \
+    fonts-noto-cjk \
+    ca-certificates \
+    --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV NODE_ENV=production
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+
+WORKDIR /app
+
+COPY server/package*.json ./
+RUN npm config set registry ${NPM_REGISTRY} \
+    && npm ci --omit=dev \
+    && npm cache clean --force
+
+COPY server/ ./
+
+RUN mkdir -p /app/uploads
+
+EXPOSE 3000
+
+CMD ["node", "index.js"]

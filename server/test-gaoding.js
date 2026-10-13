@@ -143,6 +143,30 @@ test("extractPagePreviewUrlsFromDesignData returns one preview per page", () => 
   ]);
 });
 
+test("extractPagePreviewUrlsFromDesignData supports layout-based design json", () => {
+  const data = {
+    layouts: [
+      {
+        thumbnail: {
+          url: "https://gdesign-dam-hw.dancf.com/work/layout-1-thumb.jpeg",
+        },
+        width: 1242,
+        height: 1656,
+      },
+      {
+        preview_info: {
+          url: "https://gdesign-dam-hw.dancf.com/work/layout-2-preview.jpeg",
+        },
+      },
+    ],
+  };
+
+  assert.deepStrictEqual(__internals.extractPagePreviewUrlsFromDesignData(data), [
+    "https://gdesign-dam-hw.dancf.com/work/layout-1-thumb.jpeg",
+    "https://gdesign-dam-hw.dancf.com/work/layout-2-preview.jpeg",
+  ]);
+});
+
 test("shouldAttemptDynamicAfterStatic keeps probing share links with single static image", () => {
   assert.strictEqual(
     __internals.shouldAttemptDynamicAfterStatic(

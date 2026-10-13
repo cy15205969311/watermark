@@ -2,10 +2,52 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 const puppeteer = require("puppeteer-extra");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+const { withPuppeteerExecutablePath } = require("../utils/puppeteer-launch");
+const { AsyncLocalStorage } = require("async_hooks");
+const { getDefaultPool } = require("../services/browser-pool");
+const { collectPageData, resolveEvidence, buildPageResult, imageIdentity, redact, MAX_PAGES } = require("./818ps-pages");
+const extractionContext = new AsyncLocalStorage();
+
+function diagnostic(stage, data = {}) {
+  const context = extractionContext.getStore();
+  console.log(`[818ps:${context?.requestId || "standalone"}] ${stage} ${redact(JSON.stringify(data))}`);
+}
+
+async function mapLimited(items, task, concurrency = 4) {
+  const results = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await task(items[index], index);
+    }
+  }));
+  return results;
+}
+
+async function validatePageCollection(collection, source) {
+  const context = extractionContext.getStore();
+  const candidates = collection.candidates.slice(0, 400);
+  await mapLimited(candidates, async candidate => {
+    if (context && Date.now() > context.deadline) {
+      candidate.validationStatus = "budget_exhausted";
+      return;
+    }
+    const validation = await validateImageResource(candidate.imageUrl);
+    Object.assign(candidate, validation, { validationStatus: validation.valid ? "valid" : "invalid" });
+    diagnostic("candidate", { source: candidate.source, page: candidate.pageNumber, pageId: candidate.pageId, url: candidate.imageUrl, width: candidate.width, height: candidate.height, score: candidate.score, status: candidate.validationStatus, reason: validation.reason });
+  });
+  diagnostic("collection", { source, raw: collection.candidates.length, filtered: candidates.length, valid: candidates.filter(entry => entry.validationStatus === "valid").length, excluded: collection.excluded || [], evidence: collection.evidence });
+  return buildPageResult(candidates, collection.evidence, { source, candidates });
+}
+
+function mergeStageResults(results) {
+  const candidates = results.flatMap(result => result.candidates || []);
+  const evidence = results.flatMap(result => result.evidence || []);
+  return buildPageResult(candidates, evidence, { source: results.filter(result => result.success).at(-1)?.source || "none", candidates, warnings: results.flatMap(result => result.warnings?.filter(warning => !["total_page_count_unknown", "missing_or_unmapped_pages"].includes(warning)) || []) });
+}
 
 puppeteer.use(StealthPlugin());
-
-const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
 
 const USER_AGENTS = [
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -229,42 +271,10 @@ function buildPages(imageUrls) {
 }
 
 function normalizeResultImages(result = {}) {
-  const rawPages = Array.isArray(result.pages) ? result.pages : [];
-  const pageUrls = rawPages
-    .map((page) => normalizeCandidateUrl(page && page.imageUrl))
-    .filter(Boolean);
-
-  const uniqueUrls = sortUrlsByPageToken(
-    dedupeKeepOrder(
-      [
-        ...(Array.isArray(result.imageUrls) ? result.imageUrls : []),
-        ...(Array.isArray(result.images) ? result.images : []),
-        ...pageUrls,
-        result.imageUrl,
-      ]
-        .map(normalizeCandidateUrl)
-        .filter(Boolean)
-    )
-  );
-
-  const pages = buildPages(uniqueUrls);
-  const metadata = {
-    ...(result.metadata || {}),
-    results: uniqueUrls.length,
-  };
-
-  return {
-    success: result.success !== false,
-    platform: "818ps",
-    ...result,
-    imageUrl: uniqueUrls[0] || null,
-    imageUrls: uniqueUrls,
-    images: uniqueUrls,
-    pages,
-    pageCount: uniqueUrls.length,
-    isMultiPage: uniqueUrls.length > 1,
-    metadata,
-  };
+  const urls = dedupeKeepOrder([...(result.imageUrls || []), ...(result.images || []), ...(result.pages || []).map(page => page.imageUrl), result.imageUrl].map(normalizeCandidateUrl).filter(Boolean));
+  const pages = urls.map((imageUrl, index) => ({ ...((result.pages || []).find(page => page.imageUrl === imageUrl) || { page: index + 1, pageNumber: null }), imageUrl })).sort((a, b) => a.page - b.page);
+  const imageUrls = pages.map(page => page.imageUrl);
+  return { success: result.success !== false && imageUrls.length > 0, platform: "818ps", ...result, imageUrl: imageUrls[0] || null, imageUrls, images: imageUrls, pages, pageCount: pages.length, collectedPageCount: pages.length, isMultiPage: pages.length > 1 || result.expectedPageCount > 1, expectedPageCount: result.expectedPageCount || null, pageCountConfidence: result.pageCountConfidence || "unknown", completenessStatus: result.completenessStatus || "unknown", isComplete: result.isComplete ?? null, missingPages: result.missingPages || [], warnings: result.warnings || [], metadata: { ...(result.metadata || {}), results: pages.length } };
 }
 
 function buildSuccessResult(imageUrls, extras = {}) {
@@ -461,139 +471,81 @@ function isImageContentType(headers = {}) {
 }
 
 function isValidImageResponse(status, headers) {
-  if (![200, 206].includes(status)) {
-    return false;
-  }
+  return [200, 206].includes(status) && isImageContentType(headers);
+}
 
-  if (!isImageContentType(headers)) {
-    return false;
-  }
+function imageMagic(buffer) {
+  return buffer.length >= 12 && (buffer.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])) || (buffer[0] === 255 && buffer[1] === 216 && buffer[2] === 255) || /^GIF8[79]a/.test(buffer.toString("ascii", 0, 6)) || (buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP") || (buffer.toString("ascii", 4, 8) === "ftyp" && /avif|avis|heic/.test(buffer.toString("ascii", 8, 32))));
+}
 
-  const fileSize = extractReportedSize(headers);
-  if (fileSize !== null && fileSize < 10 * 1024) {
-    return false;
-  }
-
-  return true;
+async function validateImageResource(imageUrl) {
+  const normalizedUrl = normalizeCandidateUrl(imageUrl);
+  if (!normalizedUrl) return { valid: false, reason: "invalid_url" };
+  const context = extractionContext.getStore();
+  if (context?.validations.has(normalizedUrl)) return context.validations.get(normalizedUrl);
+  const pending = (async () => {
+    const headers = getAntiHotlinkHeaders(normalizedUrl);
+    let headStatus = null;
+    try {
+      const response = await axios.head(normalizedUrl, { headers, timeout: 2500, maxRedirects: 3, validateStatus: () => true });
+      headStatus = response.status;
+      if ([404, 410].includes(headStatus)) return { valid: false, status: headStatus, reason: "not_found_or_expired" };
+    } catch { /* HEAD unsupported or unreliable; inspect a bounded GET body. */ }
+    try {
+      const response = await axios.get(normalizedUrl, { headers: { ...headers, Range: "bytes=0-65535" }, timeout: 4000, maxRedirects: 3, responseType: "stream", validateStatus: () => true });
+      const status = response.status;
+      const contentType = String(response.headers["content-type"] || "");
+      if (![200, 206].includes(status)) {
+        response.data.destroy();
+        return { valid: false, status, headStatus, reason: status === 403 ? "forbidden_or_expired_signature" : status === 429 ? "rate_limited" : status >= 500 ? "cdn_error" : "http_error" };
+      }
+      const chunks = [];
+      let size = 0;
+      for await (const chunk of response.data) {
+        chunks.push(chunk.subarray(0, Math.max(0, 65536 - size)));
+        size += chunk.length;
+        if (size >= 65536) { response.data.destroy(); break; }
+      }
+      const buffer = Buffer.concat(chunks);
+      if (!isImageContentType(response.headers) || !imageMagic(buffer)) return { valid: false, status, contentType, reason: "non_image_body" };
+      let dimensions = {};
+      try {
+        const metadata = await require("sharp")(buffer, { limitInputPixels: 100000000 }).metadata();
+        dimensions = { width: metadata.width, height: metadata.height, aspectRatio: metadata.width / metadata.height };
+      } catch { /* Partial image headers can be valid without decodable dimensions. */ }
+      return { valid: true, status, contentType, contentLength: extractReportedSize(response.headers), ...dimensions, reason: "image_signature_verified" };
+    } catch (error) {
+      return { valid: false, reason: /TIME|ABORT/.test(error.code || "") ? "timeout" : error.code || "network_error" };
+    }
+  })();
+  context?.validations.set(normalizedUrl, pending);
+  return pending;
 }
 
 async function validateImageUrl(imageUrl) {
-  const normalizedUrl = normalizeCandidateUrl(imageUrl);
-  if (!normalizedUrl) {
-    return false;
-  }
-
-  const headers = getAntiHotlinkHeaders(normalizedUrl);
-
-  try {
-    const headResp = await axios.head(normalizedUrl, {
-      headers,
-      timeout: 2000,
-      maxRedirects: 5,
-      validateStatus: () => true,
-    });
-
-    if (isValidImageResponse(headResp.status, headResp.headers)) {
-      return true;
-    }
-
-    if (headResp.status === 404) {
-      return false;
-    }
-  } catch {
-    // Ignore HEAD failures and try ranged GET.
-  }
-
-  try {
-    const rangeResp = await axios.get(normalizedUrl, {
-      headers: {
-        ...headers,
-        Range: "bytes=0-0",
-      },
-      timeout: 2000,
-      maxRedirects: 5,
-      responseType: "arraybuffer",
-      validateStatus: () => true,
-    });
-
-    return isValidImageResponse(rangeResp.status, rangeResp.headers);
-  } catch {
-    return false;
-  }
+  return (await validateImageResource(imageUrl)).valid;
 }
 
 async function findFirstValidCandidate(candidateUrls) {
-  const normalizedCandidates = dedupeKeepOrder(
-    (candidateUrls || []).map(normalizeCandidateUrl).filter(Boolean)
-  );
-
-  if (!normalizedCandidates.length) {
-    return null;
+  const candidates = dedupeKeepOrder(candidateUrls.map(normalizeCandidateUrl).filter(Boolean)).slice(0, 48);
+  for (let index = 0; index < candidates.length; index += 4) {
+    const batch = candidates.slice(index, index + 4);
+    const valid = await mapLimited(batch, validateImageUrl);
+    const match = batch.find((url, i) => valid[i]);
+    if (match) return match;
   }
-
-  return new Promise((resolve) => {
-    let pending = normalizedCandidates.length;
-    let settled = false;
-
-    normalizedCandidates.forEach((candidateUrl) => {
-      validateImageUrl(candidateUrl)
-        .then((isValid) => {
-          if (settled) {
-            return;
-          }
-
-          if (isValid) {
-            settled = true;
-            resolve(candidateUrl);
-            return;
-          }
-
-          pending -= 1;
-          if (pending <= 0) {
-            resolve(null);
-          }
-        })
-        .catch(() => {
-          if (settled) {
-            return;
-          }
-
-          pending -= 1;
-          if (pending <= 0) {
-            resolve(null);
-          }
-        });
-    });
-  });
+  return null;
 }
 
 function build818psVariants(url) {
-  const variants = new Set();
-  if (typeof url !== "string" || !url) {
-    return [];
-  }
-
-  const baseUrl = url.split("?")[0];
-  const query = url.includes("?") ? url.slice(url.indexOf("?")) : "";
-
-  variants.add(baseUrl.replace(/!l\d+(_b)?$/i, ""));
-  variants.add(baseUrl.replace(/!\w+$/i, ""));
-  variants.add(baseUrl.replace(/ips_user_preview_api\//i, "pic/"));
-  variants.add(baseUrl.replace(/user_preview_ue\//i, "pic/"));
-  variants.add(baseUrl.replace(/preview/gi, "origin"));
-  variants.add(baseUrl.replace(/psd_import\//i, "pic/"));
-
-  const baseWithoutExt = baseUrl.replace(/\.(jpeg|jpg|png|webp)(!.*)?$/i, "");
-  [".png", ".jpg", ".jpeg", ".webp"].forEach((ext) =>
-    variants.add(`${baseWithoutExt}${ext}`)
-  );
-
-  const result = Array.from(variants);
-  if (query) {
-    return dedupeKeepOrder(result.concat(result.map((item) => `${item}${query}`)));
-  }
-
-  return result;
+  const normalized = normalizeCandidateUrl(url);
+  if (!normalized) return [];
+  // Existing styles are valid public resources; signed paths cannot be rewritten safely.
+  if (/[?&](auth_key|signature|sign)=/i.test(normalized)) return [normalized];
+  const parsed = new URL(normalized);
+  const original = parsed.toString();
+  parsed.pathname = parsed.pathname.replace(/!l\d+(_b)?$/i, "");
+  return dedupeKeepOrder([original, parsed.toString()]);
 }
 
 function isRelevantDynamicImage(url) {
@@ -770,9 +722,7 @@ async function validateImageEntryUrls(entries) {
     return [];
   }
 
-  const results = await Promise.all(
-    normalizedEntries.map((entry) => validateImageUrl(entry.url))
-  );
+  const results = await mapLimited(normalizedEntries.slice(0, 400), entry => validateImageUrl(entry.url));
 
   const validUrls = [];
   const seen = new Set();
@@ -1103,6 +1053,9 @@ function mergeDynamicCapture(base = {}, snapshot = {}) {
     merged.pageSource = snapshot.pageSource || merged.pageSource;
   }
 
+  for (const block of Object.values(snapshot.windowData || {})) {
+    if (merged.jsonData.length < 200) merged.jsonData.push(block);
+  }
   merged.windowData = {
     ...merged.windowData,
     ...(snapshot.windowData || {}),
@@ -1112,7 +1065,7 @@ function mergeDynamicCapture(base = {}, snapshot = {}) {
   for (const jsonItem of snapshot.jsonData || []) {
     const jsonKey = JSON.stringify(jsonItem);
     if (!existingJsonKeys.has(jsonKey)) {
-      merged.jsonData.push(jsonItem);
+      if (merged.jsonData.length < 200) merged.jsonData.push(jsonItem);
       existingJsonKeys.add(jsonKey);
     }
   }
@@ -1171,7 +1124,7 @@ function mergeDynamicCapture(base = {}, snapshot = {}) {
 }
 
 async function captureDynamicSnapshot(page) {
-  return page.evaluate(() => {
+  const snapshot = await page.evaluate(() => {
     const result = {
       pageSource: document.documentElement.outerHTML,
       windowData: {},
@@ -1412,172 +1365,96 @@ async function captureDynamicSnapshot(page) {
     result.pageMarkers = Array.from(pageMarkerSet);
     return result;
   });
+  const controls = await page.evaluate(scanPageControls);
+  snapshot.pageMarkers = dedupeKeepOrder(snapshot.pageMarkers.concat(controls.map(control => `page_${control.page}`)));
+  snapshot.activePage = controls.find(control => control.active)?.page || null;
+  snapshot.controls = controls;
+  return snapshot;
+}
+
+// This adapter uses the existing 第N页 markers and explicit page attributes inside a
+// page/thumb navigation context. Arbitrary numbered buttons are never clicked.
+function scanPageControls() {
+  const controls = [];
+  for (const el of document.querySelectorAll("button,[role=tab],[role=button],[data-page],[data-page-number],[aria-label],[title],div,span")) {
+    const text = String(el.getAttribute("aria-label") || el.getAttribute("title") || el.innerText || el.textContent || "").replace(/\s+/g, "");
+    const label = text.length <= 14 && text.match(/^第?(\d+)页$/);
+    const context = el.closest('[class*="page"],[class*="thumb"],[class*="slide"],[role="tablist"]');
+    const attribute = context && (el.getAttribute("data-page") || el.getAttribute("data-page-number"));
+    const number = Number(label?.[1] || attribute);
+    if (!Number.isInteger(number) || number < 1 || number > 10000) continue;
+    let target = el;
+    for (let depth = 0; target && depth < 4; depth++, target = target.parentElement) {
+      const style = getComputedStyle(target);
+      const rect = target.getBoundingClientRect();
+      if (style.display === "none" || style.visibility === "hidden" || !rect.width || !rect.height || target.disabled || target.getAttribute("aria-disabled") === "true") continue;
+      if (target.matches("button,[role=button],[role=tab]") || style.cursor === "pointer" || typeof target.onclick === "function") {
+        if (!controls.some(control => control.page === number)) controls.push({ page: number, active: target.getAttribute("aria-selected") === "true" || target.getAttribute("aria-current") === "page" || /(^|[\s_-])(active|selected|current)([\s_-]|$)/i.test(String(target.className)), x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+        break;
+      }
+    }
+  }
+  return controls.sort((a, b) => a.page - b.page);
 }
 
 async function activateDynamicPage(page, pageNumber) {
-  return page.evaluate((targetPage) => {
-    function normalizeText(text) {
-      return String(text || "").replace(/\s+/g, "").trim();
-    }
-
-    function extractPage(text) {
-      const normalized = normalizeText(text);
-      const match = normalized.match(/^\u7b2c(\d+)\u9875$/);
-      return match ? Number(match[1]) : null;
-    }
-
-    function isVisible(el) {
-      if (!el) return false;
-      const rect = el.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
-    }
-
-    function findClickable(el) {
-      let current = el;
-      let fallback = el;
-
-      for (let depth = 0; current && depth < 6; depth += 1) {
-        try {
-          if (isVisible(current)) fallback = current;
-
-          const style = window.getComputedStyle(current);
-          const className = String(current.className || "");
-          const clickable =
-            current.tagName === "BUTTON" ||
-            current.tagName === "A" ||
-            current.getAttribute("role") === "button" ||
-            current.tabIndex >= 0 ||
-            typeof current.onclick === "function" ||
-            String(style.cursor || "").includes("pointer") ||
-            /page|thumb|item|card|preview|cover|list/i.test(className);
-
-          if (clickable && isVisible(current)) {
-            return current;
-          }
-        } catch {
-          // Ignore clickable traversal errors.
+  const controls = await page.evaluate(scanPageControls);
+  const marker = controls.find(control => control.page === pageNumber);
+  if (!marker) return { requestedPage: pageNumber, clicked: false, reason: "interactive_marker_not_found" };
+  if (marker.active) return { requestedPage: pageNumber, clicked: false, alreadyActive: true, reason: "already_active" };
+  // Resolve/scroll exactly the selected control, then send a single native click.
+  const position = await page.evaluate((targetPage) => {
+    for (const el of document.querySelectorAll("button,[role=tab],[role=button],[data-page],[data-page-number],[aria-label],[title],div,span")) {
+      const text = String(el.getAttribute("aria-label") || el.getAttribute("title") || el.innerText || el.textContent || "").replace(/\s+/g, "");
+      const label = text.length <= 14 && text.match(/^第?(\d+)页$/);
+      const context = el.closest('[class*="page"],[class*="thumb"],[class*="slide"],[role="tablist"]');
+      const number = Number(label?.[1] || (context && (el.getAttribute("data-page") || el.getAttribute("data-page-number"))));
+      if (number !== targetPage) continue;
+      let target = el;
+      for (let depth = 0; target && depth < 4; depth++, target = target.parentElement) {
+        const style = getComputedStyle(target);
+        if (target.disabled || style.visibility === "hidden" || style.display === "none") continue;
+        if (target.matches("button,[role=button],[role=tab]") || style.cursor === "pointer" || typeof target.onclick === "function") {
+          target.scrollIntoView({ block: "center", inline: "center" });
+          const rect = target.getBoundingClientRect();
+          if (rect.width && rect.height) return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
         }
-
-        current = current.parentElement;
-      }
-
-      return fallback;
-    }
-
-    const markers = [];
-    Array.from(document.querySelectorAll("*")).forEach((el) => {
-      try {
-        if (!isVisible(el)) return;
-        const markerText = String(el.innerText || el.textContent || "").trim();
-        if (!markerText || markerText.length > 12) return;
-
-        const pageNumberFromText = extractPage(markerText);
-        if (!pageNumberFromText) return;
-
-        markers.push({
-          page: pageNumberFromText,
-          label: `page_${pageNumberFromText}`,
-          el,
-        });
-      } catch {
-        // Ignore marker extraction errors.
-      }
-    });
-
-    markers.sort((a, b) => a.page - b.page);
-    const marker = markers.find((item) => item.page === targetPage);
-    if (!marker) {
-      return {
-        requestedPage: targetPage,
-        label: `page_${targetPage}`,
-        clicked: false,
-        reason: "marker_not_found",
-        availablePages: markers.map((item) => item.label),
-      };
-    }
-
-    const target = findClickable(marker.el);
-    try {
-      target.scrollIntoView({ block: "center", inline: "nearest" });
-    } catch {
-      // Ignore scroll failures.
-    }
-
-    const rect = target.getBoundingClientRect();
-    const clientX = Math.max(
-      rect.left + Math.min(rect.width / 2, Math.max(rect.width - 8, 1)),
-      1
-    );
-    const clientY = Math.max(
-      rect.top + Math.min(rect.height / 2, Math.max(rect.height - 8, 1)),
-      1
-    );
-    let clicked = false;
-
-    function dispatchMouse(el, type) {
-      try {
-        el.dispatchEvent(
-          new MouseEvent(type, {
-            view: window,
-            bubbles: true,
-            cancelable: true,
-            clientX,
-            clientY,
-            buttons: 1,
-          })
-        );
-        return true;
-      } catch {
-        return false;
       }
     }
-
-    ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach((type) => {
-      if (dispatchMouse(target, type)) {
-        clicked = true;
-      }
-    });
-
-    try {
-      target.click();
-      clicked = true;
-    } catch {
-      // Ignore direct click failures.
-    }
-
-    if (marker.el !== target) {
-      try {
-        marker.el.click();
-        clicked = true;
-      } catch {
-        // Ignore marker click failures.
-      }
-    }
-
-    try {
-      const overlay = document.elementFromPoint(clientX, clientY);
-      if (overlay && overlay !== target && overlay !== marker.el) {
-        overlay.click();
-        clicked = true;
-      }
-    } catch {
-      // Ignore overlay click failures.
-    }
-
-    try {
-      target.focus({ preventScroll: true });
-    } catch {
-      // Ignore focus failures.
-    }
-
-    return {
-      requestedPage: targetPage,
-      label: `page_${targetPage}`,
-      clicked,
-      reason: clicked ? "clicked" : "no_click_effect",
-      availablePages: markers.map((item) => item.label),
-    };
+    return null;
   }, pageNumber);
+  if (!position) return { requestedPage: pageNumber, clicked: false, reason: "control_not_interactable" };
+  await page.mouse.click(position.x, position.y);
+  return { requestedPage: pageNumber, clicked: true, reason: "clicked_awaiting_change" };
+}
+
+function currentPreviewUrls(snapshot) {
+  const structured = [...(snapshot.jsonData || []), ...Object.values(snapshot.windowData || {})].flatMap(block => collectPageData(block).candidates);
+  const known = new Set(structured.map(entry => imageIdentity(entry.imageUrl)));
+  return (snapshot.visibleCandidates || []).filter(candidate => candidate.visibleArea > 0 && candidate.isLarge && (isDesignPageCandidate(candidate.url) || known.has(imageIdentity(candidate.url)))).sort((a, b) => b.visibleArea - a.visibleArea).slice(0, 1).map(candidate => candidate.url);
+}
+
+async function captureActivatedPage(page, pageNumber, before, deadline) {
+  const activation = await activateDynamicPage(page, pageNumber);
+  const previous = currentPreviewUrls(before).map(imageIdentity).join("|");
+  let snapshot = before;
+  let stable = 0;
+  let last = "";
+  for (let attempt = 0; attempt < 8 && Date.now() < deadline; attempt++) {
+    await delay(350);
+    snapshot = await captureDynamicSnapshot(page);
+    const previews = currentPreviewUrls(snapshot);
+    const key = previews.map(imageIdentity).join("|");
+    stable = key && key === last ? stable + 1 : 0;
+    last = key;
+    // A changed active class alone is insufficient: the image may still be the old page.
+    const changed = key && key !== previous;
+    const sameActive = activation.alreadyActive && before.activePage === pageNumber;
+    if (stable >= 1 && (sameActive || (activation.clicked && changed)) && (!snapshot.activePage || snapshot.activePage === pageNumber)) {
+      return { ...snapshot, page: pageNumber, previewUrls: previews, activation: { ...activation, confirmed: true, reason: sameActive ? "active_preview_loaded" : "preview_changed" } };
+    }
+  }
+  return { ...snapshot, page: pageNumber, previewUrls: [], activation: { ...activation, confirmed: false, reason: activation.clicked ? "preview_did_not_change_or_load" : activation.reason } };
 }
 
 async function scrollDynamicPage(page, roundIndex) {
@@ -1686,128 +1563,71 @@ async function scrollDynamicPage(page, roundIndex) {
 }
 
 async function extractDynamicContent(url, options = {}) {
+  const pool = options.browserPool || getDefaultPool();
   let browser = null;
-
+  let page = null;
+  let pageData = {};
+  const networkJson = [];
+  const pendingResponses = new Set();
+  const deadline = Math.min(extractionContext.getStore()?.deadline || Infinity, Date.now() + (options.dynamicTimeout || 40000));
   try {
-    const launchOptions = {
-      headless: options.headless !== false ? "new" : false,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-blink-features=AutomationControlled",
-      ],
-    };
-
-    if (executablePath) {
-      launchOptions.executablePath = executablePath;
-    }
-
-    browser = await puppeteer.launch(launchOptions);
-    const page = await browser.newPage();
-
+    browser = await pool.acquire(Math.min(10000, Math.max(1, deadline - Date.now())));
+    diagnostic("browser", { pooled: true });
+    page = await browser.newPage();
     await page.setViewport({ width: 1440, height: 1080, deviceScaleFactor: 1 });
     await page.setUserAgent(getRandomUserAgent());
-    await page.setExtraHTTPHeaders({
-      "Accept-Language": COMMON_HEADERS["Accept-Language"],
-      Referer: "https://818ps.com/",
-      Origin: "https://818ps.com",
-    });
-
+    await page.setExtraHTTPHeaders({ "Accept-Language": COMMON_HEADERS["Accept-Language"], Referer: "https://818ps.com/", Origin: "https://818ps.com" });
     await page.setRequestInterception(true);
-    page.on("request", (request) => {
-      const resourceType = request.resourceType();
-      if (["font", "media"].includes(resourceType)) {
-        request.abort();
-        return;
-      }
-
-      request.continue();
+    page.on("request", request => {
+      (["font", "media"].includes(request.resourceType()) ? request.abort() : request.continue()).catch(() => {});
     });
-
-    await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: options.timeout || BROWSER_TIMEOUT,
+    page.on("response", response => {
+      if (networkJson.length >= 100 || Date.now() >= deadline || !/\bjson\b/i.test(response.headers()["content-type"] || "") || !/(818ps|tuguaishou)\.com/.test(response.url()) || Number(response.headers()["content-length"] || 0) > 2000000) return;
+      const task = response.text().then(text => { if (text.length <= 2000000 && networkJson.length < 100) { try { networkJson.push(JSON.parse(text)); } catch {} } }).catch(() => {}).finally(() => pendingResponses.delete(task));
+      pendingResponses.add(task);
     });
-
-    await delay(5000);
-
-    let pageData = mergeDynamicCapture({}, await captureDynamicSnapshot(page));
-    let previousImageCount = (pageData.imageUrls || []).length;
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: Math.min(options.timeout || BROWSER_TIMEOUT, Math.max(1, deadline - Date.now())) });
+    await delay(1500);
+    pageData = mergeDynamicCapture({}, await captureDynamicSnapshot(page));
+    let previousCount = 0;
     let idleRounds = 0;
-
-    for (let roundIndex = 0; roundIndex < 8; roundIndex += 1) {
-      const scrollState = await scrollDynamicPage(page, roundIndex);
-      await delay(1200);
-
+    for (let round = 0; round < 8 && Date.now() < deadline; round++) {
+      const scrollState = await scrollDynamicPage(page, round);
+      await delay(600);
       const snapshot = await captureDynamicSnapshot(page);
       snapshot.scrollState = scrollState;
       pageData = mergeDynamicCapture(pageData, snapshot);
-
-      const currentImageCount = (pageData.imageUrls || []).length;
-      const gainedImages = currentImageCount - previousImageCount;
-      previousImageCount = currentImageCount;
-
-      if ((scrollState.moved || 0) <= 0 && gainedImages <= 0) {
-        idleRounds += 1;
-      } else {
-        idleRounds = 0;
-      }
-
-      if (idleRounds >= 2) {
-        break;
-      }
+      const count = pageData.pageMarkers.length + pageData.imageUrls.length;
+      idleRounds = !scrollState.moved && count === previousCount ? idleRounds + 1 : 0;
+      previousCount = count;
+      if (idleRounds >= 3) break;
     }
-
-    const pageTargets = dedupeKeepOrder(
-      (pageData.pageMarkers || [])
-        .map(extractPageNumber)
-        .filter((pageNumber) => Number.isInteger(pageNumber))
-        .map(String)
-    ).map((value) => Number(value));
-
+    pageData.jsonData.push(...networkJson);
+    const evidence = [...pageData.jsonData, ...Object.values(pageData.windowData)].flatMap(block => collectPageData(block).evidence);
+    const expected = resolveEvidence(evidence).expectedPageCount || options.expectedPageCount;
+    const targets = [...new Set([...(pageData.pageMarkers || []).map(extractPageNumber).filter(Boolean), ...(expected ? Array.from({ length: Math.min(expected, MAX_PAGES) }, (_, index) => index + 1) : [])])].sort((a, b) => a - b).slice(0, MAX_PAGES);
     const pageSnapshots = [];
-    const pageSpecificImages = [];
-    const seenSnapshotUrls = new Set(
-      dedupeKeepOrder((pageData.imageUrls || []).concat(pageData.resourceUrls || []))
-    );
-
-    for (const pageNumber of pageTargets) {
-      const activationState = await activateDynamicPage(page, pageNumber);
-      await delay(1200);
-
-      const snapshot = await captureDynamicSnapshot(page);
-      snapshot.page = pageNumber;
-      snapshot.label = `page_${pageNumber}`;
-      snapshot.activation = activationState;
-
-      const snapshotUrlPool = dedupeKeepOrder(
-        (snapshot.imageUrls || []).concat(snapshot.resourceUrls || [])
-      );
-      const newUrls = snapshotUrlPool.filter((imageUrl) => !seenSnapshotUrls.has(imageUrl));
-      const previewUrls = selectSnapshotPreviewUrls(snapshot, newUrls, 3);
-
-      snapshot.newUrls = newUrls;
-      snapshot.previewUrls = previewUrls;
-
+    for (const pageNumber of targets) {
+      if (Date.now() >= deadline) { pageData.warnings = ["dynamic_budget_exhausted"]; break; }
+      const before = await captureDynamicSnapshot(page);
+      const snapshot = await captureActivatedPage(page, pageNumber, before, deadline);
+      diagnostic("activation", { page: pageNumber, ...snapshot.activation, previews: snapshot.previewUrls.length });
       pageData = mergeDynamicCapture(pageData, snapshot);
       pageSnapshots.push(snapshot);
-
-      if (previewUrls.length) {
-        pageSpecificImages.push(previewUrls[0]);
-      }
-
-      snapshotUrlPool.forEach((item) => seenSnapshotUrls.add(item));
     }
-
     pageData.pageSnapshots = pageSnapshots;
-    pageData.pageSpecificImages = dedupeKeepOrder(pageSpecificImages);
-
+    pageData.jsonData.push(...networkJson.slice(0, 100));
+    diagnostic("network", { jsonResponses: networkJson.length });
+    return pageData;
+  } catch (error) {
+    diagnostic("dynamic_failure", { reason: error.code || error.message });
+    if (!pageData.jsonData && !networkJson.length) throw error;
+    pageData.jsonData = [...(pageData.jsonData || []), ...networkJson];
+    pageData.warnings = [`dynamic_interrupted:${error.name}`];
     return pageData;
   } finally {
-    if (browser) {
-      await browser.close();
-    }
+    if (page) await page.close().catch(() => {});
+    if (browser) pool.release(browser);
   }
 }
 
@@ -1943,113 +1763,28 @@ function collectDynamicImageCandidates(dynamicData) {
 }
 
 async function analyzeDynamicData(dynamicData, originalUrl) {
-  const pageSpecificUrls = await extractPageSpecificImageUrls(dynamicData);
-  if (pageSpecificUrls.length > 1) {
-    return buildSuccessResult(pageSpecificUrls, {
-      source: "dynamic_page_activation",
-      originalUrl,
-      metadata: {
-        totalFound: (dynamicData.imageUrls || []).length,
-        afterFilter: pageSpecificUrls.length,
-        afterDedup: pageSpecificUrls.length,
-      },
-    });
-  }
-
-  const structuredGroups = [];
-  for (const jsonBlock of dynamicData.jsonData || []) {
-    collectPreviewGroupsFromData(jsonBlock, "browser.json", structuredGroups);
-  }
-
-  for (const windowBlock of Object.values(dynamicData.windowData || {})) {
-    collectPreviewGroupsFromData(windowBlock, "browser.window", structuredGroups);
-  }
-
-  for (const group of structuredGroups) {
-    const entries = group.urls.map((candidateUrl) => ({
-      url: candidateUrl,
-      source: "json",
-      score: scoreDynamicImage(candidateUrl, "json"),
-    }));
-
-    const validUrls = await validateImageEntryUrls(entries);
-    if (validUrls.length > 1) {
-      return buildSuccessResult(validUrls, {
-        source: `dynamic_structured_${group.source}`,
-        originalUrl,
-        metadata: {
-          totalFound: (dynamicData.imageUrls || []).length,
-          afterFilter: group.urls.length,
-          afterDedup: validUrls.length,
-        },
-      });
+  const collection = { candidates: [], evidence: [], excluded: [] };
+  const blocks = [...(dynamicData.jsonData || []), ...Object.values(dynamicData.windowData || {})];
+  blocks.forEach((block, index) => {
+    const parsed = collectPageData(block, `dynamic.json[${index}]`);
+    for (const key of Object.keys(collection)) collection[key].push(...parsed[key]);
+  });
+  const targets = (dynamicData.pageMarkers || []).map(extractPageNumber).filter(Boolean);
+  if (targets.length) collection.evidence.push({ count: Math.max(...targets), confidence: "inferred", source: "dynamic.page_markers" });
+  for (const snapshot of dynamicData.pageSnapshots || []) {
+    if (!snapshot.activation?.confirmed) continue;
+    for (const imageUrl of snapshot.previewUrls || []) {
+      collection.candidates.push({ imageUrl, source: "dynamic_page_activation", pageNumber: snapshot.page, pageId: null, role: "page_preview", score: 1200 });
     }
   }
-
-  const candidateEntries = collectDynamicImageCandidates(dynamicData);
-  const pageCandidates = candidateEntries.filter((entry) =>
-    isDesignPageCandidate(entry.url)
-  );
-
-  if (pageCandidates.length) {
-    const validPageUrls = await validateImageEntryUrls(pageCandidates);
-    if (validPageUrls.length) {
-      const mergedPageUrls = [];
-      const seenPageUrls = new Set();
-
-      for (const imageUrl of pageSpecificUrls.concat(validPageUrls)) {
-        const normalizedUrl = normalizeCandidateUrl(imageUrl);
-        if (!normalizedUrl || seenPageUrls.has(normalizedUrl)) {
-          continue;
-        }
-
-        seenPageUrls.add(normalizedUrl);
-        mergedPageUrls.push(normalizedUrl);
-      }
-
-      return buildSuccessResult(mergedPageUrls, {
-        source:
-          pageSpecificUrls.length > 0
-            ? "dynamic_page_activation"
-            : mergedPageUrls.length > 1
-              ? "dynamic_multi_page_extraction"
-              : "dynamic_json_extraction",
-        originalUrl,
-        metadata: {
-          totalFound: candidateEntries.length,
-          afterFilter: pageCandidates.length,
-          afterDedup: mergedPageUrls.length,
-        },
-      });
-    }
+  if (!collection.candidates.length) {
+    // Unmapped DOM fallback is intentionally a single unknown preview, never a page list.
+    const entries = collectDynamicImageCandidates(dynamicData).filter(entry => isDesignPageCandidate(entry.url)).sort((a, b) => b.score - a.score).slice(0, 12);
+    entries.forEach(entry => collection.candidates.push({ imageUrl: entry.url, source: entry.source, role: "page_preview", score: entry.score, pageNumber: null }));
   }
-
-  if (pageSpecificUrls.length) {
-    return buildSuccessResult(pageSpecificUrls, {
-      source: "dynamic_page_activation",
-      originalUrl,
-      metadata: {
-        totalFound: candidateEntries.length,
-        afterFilter: pageSpecificUrls.length,
-        afterDedup: pageSpecificUrls.length,
-      },
-    });
-  }
-
-  const bestCandidate = [...candidateEntries].sort((a, b) => b.score - a.score)[0];
-  if (bestCandidate && (await validateImageUrl(bestCandidate.url))) {
-    return buildSuccessResult([bestCandidate.url], {
-      source: "dynamic_json_extraction",
-      originalUrl,
-      metadata: {
-        totalFound: candidateEntries.length,
-        afterFilter: candidateEntries.length,
-        afterDedup: 1,
-      },
-    });
-  }
-
-  return null;
+  diagnostic("dynamic_counts", { json: blocks.length, dom: (dynamicData.imageUrls || []).length, performance: (dynamicData.resourceUrls || []).length, activation: (dynamicData.pageSnapshots || []).length });
+  const result = await validatePageCollection(collection, collection.candidates.some(entry => entry.source === "dynamic_page_activation") ? "dynamic_page_activation" : "dynamic_json_extraction");
+  return { ...result, originalUrl, warnings: [...result.warnings, ...(dynamicData.warnings || [])] };
 }
 
 async function fetchJson(url, referer) {
@@ -2078,77 +1813,12 @@ async function fetchJson(url, referer) {
 }
 
 function extractExpectedPageCountFromShareApiPayloads(payloads = {}) {
-  const counts = [];
-
-  const shareTemplateData = payloads.share_template && payloads.share_template.data;
-  if (shareTemplateData && Array.isArray(shareTemplateData.preview)) {
-    counts.push(shareTemplateData.preview.length);
-  }
-
-  const teamSharePayload = payloads.team_share_get_templ;
-  if (teamSharePayload && typeof teamSharePayload === "object") {
-    if (teamSharePayload.page_map && typeof teamSharePayload.page_map === "object") {
-      counts.push(Object.keys(teamSharePayload.page_map).length);
-    }
-
-    if (Array.isArray(teamSharePayload.preview)) {
-      counts.push(teamSharePayload.preview.length);
-    }
-
-    const pageInfo =
-      teamSharePayload.doc &&
-      teamSharePayload.doc.pageAttr &&
-      teamSharePayload.doc.pageAttr.pageInfo;
-
-    if (Array.isArray(pageInfo)) {
-      counts.push(pageInfo.length);
-    }
-  }
-
-  const pageDataPayload = payloads.get_template_page_data;
-  if (pageDataPayload && pageDataPayload.url && Array.isArray(pageDataPayload.url.preview)) {
-    counts.push(pageDataPayload.url.preview.length);
-  }
-
-  return Math.max(...counts.filter((count) => count > 0), 0);
+  return resolveEvidence(collectPageData(payloads, "share_api").evidence).expectedPageCount;
 }
 
 function extractShareApiPreviewGroups(payloads = {}) {
-  const groups = [];
-  const expectedPageCount = extractExpectedPageCountFromShareApiPayloads(payloads);
-
-  function addGroup(source, rawUrls) {
-    const urls = normalizePreviewGroupUrls(rawUrls);
-    if (urls.length) {
-      groups.push({
-        source,
-        urls,
-      });
-    }
-  }
-
-  const shareTemplateData = payloads.share_template && payloads.share_template.data;
-  if (shareTemplateData && Array.isArray(shareTemplateData.preview)) {
-    addGroup("share_template", shareTemplateData.preview);
-  }
-
-  const teamSharePayload = payloads.team_share_get_templ;
-  if (teamSharePayload && Array.isArray(teamSharePayload.preview)) {
-    addGroup("team_share_get_templ", teamSharePayload.preview);
-  }
-
-  const pageDataPayload = payloads.get_template_page_data;
-  if (pageDataPayload && pageDataPayload.url && Array.isArray(pageDataPayload.url.preview)) {
-    addGroup(
-      "get_template_page_data",
-      extractPreviewUrlsFromArray(pageDataPayload.url.preview)
-    );
-  }
-
-  return {
-    groups,
-    expectedPageCount,
-  };
+  const collection = collectPageData(payloads, "share_api");
+  return { ...collection, expectedPageCount: resolveEvidence(collection.evidence).expectedPageCount, groups: collection.candidates.map(candidate => ({ source: candidate.source, urls: [candidate.imageUrl] })) };
 }
 
 async function extractFromShareApi(url) {
@@ -2197,47 +1867,8 @@ async function extractFromShareApi(url) {
     }
   }
 
-  const { groups, expectedPageCount } = extractShareApiPreviewGroups(payloads);
-  if (!groups.length) {
-    return null;
-  }
-
-  let bestPartialResult = null;
-
-  for (const group of groups) {
-    const entries = group.urls.map((candidateUrl) => ({
-      url: candidateUrl,
-      source: `share_api_${group.source}`,
-      score: scoreDynamicImage(candidateUrl, `share_api_${group.source}`),
-    }));
-
-    const validUrls = await validateImageEntryUrls(entries);
-    if (!validUrls.length) {
-      continue;
-    }
-
-    const result = buildSuccessResult(validUrls, {
-      source: `share_api_${group.source}`,
-      originalUrl: url,
-      expectedPageCount,
-      metadata: {
-        totalFound: group.urls.length,
-        afterFilter: group.urls.length,
-        afterDedup: validUrls.length,
-        expectedPageCount,
-      },
-    });
-
-    if (expectedPageCount <= 1 || validUrls.length >= expectedPageCount || validUrls.length > 1) {
-      return result;
-    }
-
-    if (!bestPartialResult || validUrls.length > bestPartialResult.imageUrls.length) {
-      bestPartialResult = result;
-    }
-  }
-
-  return bestPartialResult;
+  const collection = collectPageData(payloads, "share_api");
+  return validatePageCollection(collection, "share_api");
 }
 
 function buildUpicIdCandidates(upicId, picId) {
@@ -2414,179 +2045,54 @@ async function scrapeWebpageEnhanced(url, options = {}) {
     jsonBlocks.flatMap((block) => extractImageUrlsFromData(block))
   );
 
-  const previewGroups = [];
-  jsonBlocks.forEach((block, index) =>
-    collectPreviewGroupsFromData(block, `static.json[${index}]`, previewGroups)
-  );
-
-  for (const group of previewGroups) {
-    const entries = group.urls.map((candidateUrl) => ({
-      url: candidateUrl,
-      source: "json",
-      score: scoreDynamicImage(candidateUrl, "json"),
-    }));
-
-    const validUrls = await validateImageEntryUrls(entries);
-    if (validUrls.length > 1) {
-      return buildSuccessResult(validUrls, {
-        source: `static_group_${group.source}`,
-        originalUrl: url,
-        metadata: {
-          totalFound: group.urls.length,
-          afterFilter: group.urls.length,
-          afterDedup: validUrls.length,
-        },
-      });
-    }
+  const collection = { candidates: [], evidence: [], excluded: [] };
+  jsonBlocks.forEach((block, index) => {
+    const parsed = collectPageData(block, `static.json[${index}]`);
+    for (const key of Object.keys(collection)) collection[key].push(...parsed[key]);
+  });
+  const combinedUrls = dedupeKeepOrder([...cheerioUrls, ...jsonUrls, ...regexUrls, metaImage].filter(Boolean));
+  if (!collection.candidates.length) {
+    const fallback = combinedUrls.filter(isDesignPageCandidate).sort((a, b) => scoreDynamicImage(b) - scoreDynamicImage(a)).slice(0, 12);
+    if (metaImage && !fallback.includes(metaImage)) fallback.push(metaImage);
+    fallback.forEach(imageUrl => collection.candidates.push({ imageUrl, source: "static_html", role: "page_preview", pageNumber: null, score: scoreDynamicImage(imageUrl) }));
   }
-
-  const combinedUrls = dedupeKeepOrder(
-    []
-      .concat(cheerioUrls)
-      .concat(jsonUrls)
-      .concat(regexUrls)
-      .concat(metaImage ? [metaImage] : [])
-  );
-
-  const pageCandidates = combinedUrls.filter((candidateUrl) =>
-    isDesignPageCandidate(candidateUrl)
-  );
-
-  if (pageCandidates.length) {
-    const entries = pageCandidates
-      .map((candidateUrl) => ({
-        url: candidateUrl,
-        source: "page_source",
-        score: scoreDynamicImage(candidateUrl, "page_source"),
-      }))
-      .sort((a, b) => b.score - a.score);
-
-    const validUrls = await validateImageEntryUrls(entries);
-    if (validUrls.length > 1) {
-      return buildSuccessResult(validUrls, {
-        source: "static_multi_page_extraction",
-        originalUrl: url,
-        metadata: {
-          totalFound: combinedUrls.length,
-          afterFilter: pageCandidates.length,
-          afterDedup: validUrls.length,
-        },
-      });
-    }
-  }
-
-  if (metaImage) {
-    const metaCandidates = [metaImage].concat(build818psVariants(metaImage));
-    const bestMeta = await findFirstValidCandidate(metaCandidates);
-    if (bestMeta) {
-      return buildSuccessResult([bestMeta], {
-        source: "meta_image",
-        originalUrl: url,
-        metadata: {
-          totalFound: combinedUrls.length,
-          afterFilter: pageCandidates.length,
-          afterDedup: 1,
-        },
-      });
-    }
-  }
-
-  const bestSingleCandidate = combinedUrls
-    .map((candidateUrl) => ({
-      url: candidateUrl,
-      source: "page_source",
-      score: scoreDynamicImage(candidateUrl, "page_source"),
-    }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 12);
-
-  const validSingleUrls = await validateImageEntryUrls(bestSingleCandidate);
-  if (validSingleUrls.length) {
-    return buildSuccessResult([validSingleUrls[0]], {
-      source: "static_best_candidate",
-      originalUrl: url,
-      metadata: {
-        totalFound: combinedUrls.length,
-        afterFilter: bestSingleCandidate.length,
-        afterDedup: 1,
-      },
-    });
-  }
-
-  return null;
+  diagnostic("static_counts", { html: combinedUrls.length, structured: collection.candidates.length, jsonBlocks: jsonBlocks.length });
+  return validatePageCollection(collection, "static_html");
 }
 
 async function extract818ps(url, options = {}) {
-  try {
-    const normalizedUrl = String(url || "").trim();
-    if (!normalizedUrl) {
-      return buildFailureResult("missing_url");
-    }
-
+  const context = { requestId: options.requestId || require("crypto").randomBytes(4).toString("hex"), deadline: Date.now() + Math.min(options.totalTimeout || 90000, 120000), validations: new Map() };
+  return extractionContext.run(context, async () => {
+    const normalizedUrl = normalizeCandidateUrl(url);
+    if (!normalizedUrl) return buildFailureResult("missing_or_invalid_url");
     const resolvedUrl = await resolve818psShareUrl(normalizedUrl);
-    const extractionUrl = resolvedUrl || normalizedUrl;
-    const queryParams = extractShareQueryParams(extractionUrl);
-
-    if (queryParams.shareId) {
-      const shareApiResult = await extractFromShareApi(extractionUrl);
-      if (shareApiResult && shareApiResult.success && shareApiResult.imageUrl) {
-        return attachResolvedUrlContext(
-          shareApiResult,
-          normalizedUrl,
-          extractionUrl
-        );
-      }
+    const query = extractShareQueryParams(resolvedUrl);
+    diagnostic("request", { platform: "818ps", target: resolvedUrl });
+    const results = [];
+    const stages = [];
+    if (query.shareId) stages.push(["share_api", () => extractFromShareApi(resolvedUrl)]);
+    if (query.upicId) stages.push(["known_path", async () => {
+      const direct = await extractWithUpicIdPriority(query.upicId, query.picId, resolvedUrl);
+      return direct ? { ...direct, candidates: direct.imageUrls.map(imageUrl => ({ imageUrl, source: "known_path", role: "page_preview", pageNumber: null, score: 200, validationStatus: "valid" })), evidence: [] } : null;
+    }]);
+    stages.push(["static_html", () => scrapeWebpageEnhanced(resolvedUrl, options)]);
+    stages.push(["dynamic", async () => analyzeDynamicData(await extractDynamicContent(resolvedUrl, { ...options, expectedPageCount: mergeStageResults(results).expectedPageCount }), resolvedUrl)]);
+    for (const [stage, run] of stages) {
+      if (Date.now() >= context.deadline) { results.push({ warnings: ["extraction_budget_exhausted"] }); break; }
+      diagnostic("stage_start", { stage });
+      try { const result = await run(); if (result) results.push(result); }
+      catch (error) { diagnostic("stage_failure", { stage, reason: error.code || error.message }); results.push({ warnings: [`${stage}_failed:${error.code || error.name}`] }); }
+      const merged = mergeStageResults(results);
+      diagnostic("coverage", { stage, expected: merged.expectedPageCount, confidence: merged.pageCountConfidence, identified: merged.pages.map(page => page.pageNumber), missing: merged.missingPages, completeness: merged.completenessStatus });
+      if (merged.isComplete) break;
     }
-
-    if (queryParams.upicId) {
-      const directResult = await extractWithUpicIdPriority(
-        queryParams.upicId,
-        queryParams.picId,
-        extractionUrl
-      );
-      if (directResult && directResult.success && directResult.imageUrl) {
-        return attachResolvedUrlContext(directResult, normalizedUrl, extractionUrl);
-      }
-    }
-
-    const staticResult = await scrapeWebpageEnhanced(extractionUrl, options);
-    if (staticResult && staticResult.success && staticResult.imageUrl) {
-      return attachResolvedUrlContext(staticResult, normalizedUrl, extractionUrl);
-    }
-
-    const dynamicData = await extractDynamicContent(extractionUrl, options);
-    const dynamicResult = await analyzeDynamicData(dynamicData, extractionUrl);
-    if (dynamicResult && dynamicResult.success && dynamicResult.imageUrl) {
-      return attachResolvedUrlContext(dynamicResult, normalizedUrl, extractionUrl);
-    }
-
-    if (queryParams.upicId) {
-      const directRetryResult = await extractWithUpicIdPriority(
-        queryParams.upicId,
-        queryParams.picId,
-        extractionUrl
-      );
-      if (directRetryResult && directRetryResult.success && directRetryResult.imageUrl) {
-        return attachResolvedUrlContext(
-          directRetryResult,
-          normalizedUrl,
-          extractionUrl
-        );
-      }
-    }
-
-    return attachResolvedUrlContext(
-      buildFailureResult("no_valid_image_found"),
-      normalizedUrl,
-      extractionUrl
-    );
-  } catch (error) {
-    return buildFailureResult(error);
-  }
+    const result = mergeStageResults(results);
+    diagnostic("final", { source: result.source, expected: result.expectedPageCount, verifiedPreviews: result.pageCount, missing: result.missingPages, duplicates: result.metadata.duplicateCandidates, rejectedPageMappings: result.metadata.rejectedPageMappings, completeness: result.completenessStatus });
+    // Internal candidates are diagnostic working data; expose only selected main previews.
+    delete result.candidates;
+    return attachResolvedUrlContext(result.success ? result : { ...result, error: "no_valid_page_preview", message: "image_extract_failed" }, normalizedUrl, resolvedUrl);
+  });
 }
 
-module.exports = {
-  extract818ps,
-  validateImageUrl,
-  normalizeResultImages,
-};
+module.exports = { extract818ps, validateImageUrl, validateImageResource, normalizeResultImages,
+  _test: { extractFromShareApi, scrapeWebpageEnhanced, analyzeDynamicData, extractDynamicContent, captureDynamicSnapshot, activateDynamicPage, captureActivatedPage, currentPreviewUrls, mergeStageResults, build818psVariants, imageMagic } };
