@@ -1183,7 +1183,8 @@ function createExtractionState(url, options = {}) {
   return { url, resolvedUrl: url, shareId: shareIdFromUrl(url), designIds: new Set(),
     candidates: [], evidence: [], designRefs: new Map(), fetchedRefs: new Set(),
     validationCache: new Map(), diagnostics: [], fields: new Set(), options,
-    deadline: Date.now() + (Number(options.totalTimeout) || 60000), designDimensions: new Map() };
+    deadline: Date.now() + (Number(options.totalTimeout) || 60000), designDimensions: new Map(),
+    pendingAssetManifests: new Set(), assetRefreshAttempted: false };
 }
 
 function diagnose(state, stage, details) {
@@ -1254,7 +1255,10 @@ function collectDesignData(data, state, context = {}) {
     if (id && state.designIds.size && !state.designIds.has(String(id))) return;
     if (id && trusted) state.designIds.add(String(id));
     trusted = trusted || Boolean(id && state.designIds.has(String(id)));
-    const current = { ...ctx, trusted, designId: id ? String(id) : ctx.designId };
+    // A matched share can have a page model without repeating its sole asset ID.
+    // Bind it only when the target association is unambiguous; never guess among files.
+    const current = { ...ctx, trusted, designId: id ? String(id) : ctx.designId ||
+      (trusted && state.designIds.size === 1 ? [...state.designIds][0] : null) };
     if (trusted) {
       const previewSize = node.preview_info || node.previewInfo;
       if (current.designId && previewSize?.width && previewSize?.height) state.designDimensions.set(current.designId, { width: previewSize.width, height: previewSize.height });
@@ -1293,10 +1297,25 @@ function collectDesignData(data, state, context = {}) {
           if (peer) addPreviewNode(peer, state, { ...pageContext, path: `${ctx.path}.layouts[${layouts.indexOf(peer)}]` });
         }
       });
+    } else if (trusted && ctx.damAsset && current.designId && node.format === 'gdimage' && node.extends_previews?.length > 0 && Array.isArray(node.extends_previews) && node.preview_info?.url) {
+      // The DAM client's multi-preview component uses [preview_info, ...extends_previews]
+      // as its ordered page list (data-preview-index). This schema is NOT the same as
+      // arbitrary extensions/size variants found in older share payloads.
+      // An EMPTY extension list only describes the available preview, not the
+      // number of editor artboards. It must not certify a one-page document.
+      const previews = [node.preview_info, ...node.extends_previews];
+      state.evidence.push({ count: previews.length, source: `${ctx.path}.dam_multi_preview`, confidence: 'verified', numbered: true, designId: current.designId });
+      previews.forEach((preview, index) => {
+        const pageId = preview?.pageId ?? preview?.page_id ?? null;
+        addPreviewNode(index === 0 ? node : { preview_info: preview }, state, { ...current,
+          path: index === 0 ? ctx.path : `${ctx.path}.extends_previews[${index - 1}]`,
+          pageKey: `page:${index + 1}`, pageNumber: index + 1, pageId: pageId == null ? null : String(pageId) });
+      });
     } else if (trusted) {
       addPreviewNode(node, state, { ...current, pageKey: 'primary', pageId: null, pageNumber: null });
       // Only explicit page identity makes extends_previews separate pages.
       for (const [index, preview] of (Array.isArray(node.extends_previews) ? node.extends_previews : []).entries()) {
+        if (!preview || typeof preview !== 'object') continue;
         const pageId = preview.pageId ?? preview.page_id;
         const number = Number(preview.pageNumber ?? preview.page_number ?? preview.page);
         const pageNumber = Number.isInteger(number) && number > 0 ? number : null;
@@ -1314,6 +1333,7 @@ function collectDesignData(data, state, context = {}) {
 }
 
 function addPreviewNode(node, state, context) {
+  if (!node || typeof node !== 'object') return;
   const addFields = (value, path, bonus = 0) => {
     for (const [field, score, role] of PREVIEW_FIELDS) {
       const preview = value[field];
@@ -1354,10 +1374,13 @@ function collectHtmlData(html, state, source) {
 
 // These public endpoints and ordinary product/channel headers come from the
 // share viewer's shipped client. No login credentials or private endpoints.
-async function fetchPublicShareData(state) {
+async function fetchPublicShareData(state, refresh = false) {
   const parsed = new URL(state.url);
   if (!state.shareId || !/^\/dam\/share\//.test(parsed.pathname) || !/(^|\.)(gaoding\.com|gaoding\.cn)$/.test(parsed.hostname)) return;
-  const headers = { ...GAODING_HEADERS, Accept: 'application/json', 'x-business-id': '13', 'x-channel-id': '32' };
+  if (refresh && (state.assetRefreshAttempted || !state.pendingAssetManifests.size || state.accessRestriction || Date.now() >= state.deadline)) return;
+  if (refresh) state.assetRefreshAttempted = true;
+  const headers = { ...GAODING_HEADERS, Accept: 'application/json', 'x-business-id': '13', 'x-channel-id': '32',
+    ...(refresh ? { 'Cache-Control': 'no-cache' } : {}) };
   const get = path => axios.get(new URL(path, parsed.origin).href, { headers,
     timeout: Math.min(Number(state.options.timeout) || STATIC_TIMEOUT, Math.max(1, state.deadline - Date.now())),
     maxContentLength: 4 * 1024 * 1024, maxRedirects: 5, validateStatus: () => true });
@@ -1375,16 +1398,26 @@ async function fetchPublicShareData(state) {
     }
     const ids = Array.isArray(data.file_ids) ? data.file_ids.map(String) : [];
     ids.forEach(id => state.designIds.add(id));
-    diagnose(state, 'share_api', { shareId: config.share_code, designIds: ids, shareScope: config.share_scope });
-    for (const id of ids.slice(0, 4)) {
+    diagnose(state, 'share_api', { shareId: config.share_code, designIds: ids, shareFileIds: ids,
+      contentId: config.content_id || null, relatedAssetIds: null, relatedAssetStatus: 'not_provided', shareScope: config.share_scope, refresh });
+    for (const id of ids.filter(id => !refresh || state.pendingAssetManifests.has(id)).slice(0, 4)) {
       if (Date.now() >= state.deadline) break;
       const assetResponse = await get(`/api/dam/asset/${encodeURIComponent(id)}`);
       const asset = assetResponse.data?.data || assetResponse.data;
       if (assetResponse.status !== 200 || String(asset?.id || '') !== id) {
         diagnose(state, 'share_asset', { designId: id, status: assetResponse.status, reason: 'target_asset_unavailable' }); continue;
       }
-      collectDesignData(asset, state, { trusted: true, designId: id, source: 'share-api-preview', path: `share_api.asset[${id}]` });
+      const beforeEvidence = state.evidence.length;
+      collectDesignData(asset, state, { trusted: true, damAsset: true, designId: id, source: 'share-api-preview', path: `share_api.asset[${id}]` });
+      const manifestSources = state.evidence.slice(beforeEvidence).map(e => e.source);
+      if (manifestSources.length) state.pendingAssetManifests.delete(id);
+      else state.pendingAssetManifests.add(id);
       diagnose(state, 'share_asset', { designId: id, fields: [...state.fields], hasPreviewUrl: Boolean(asset.preview_info?.url), hasDesignJson: Boolean(asset.design_info?.url),
+        designJsonStatus: asset.design_info?.url ? 'reference_found' : 'reference_absent',
+        pagesArrayCount: asset.pages?.length || 0, layoutsArrayCount: asset.layouts?.length || 0, extendsPreviewsCount: asset.extends_previews?.length || 0,
+        assetPreviewCount: Number(Boolean(asset.preview_info?.url)), extensionPreviewCount: asset.extends_previews?.length || 0,
+        sourceWorkId: asset.source_info?.source_id || null, pageManifestSource: manifestSources,
+        manifestStatus: manifestSources.length ? 'discovered' : 'unknown', refresh,
         previewWidth: asset.preview_info?.width, previewHeight: asset.preview_info?.height });
     }
   } catch (error) { diagnose(state, 'share_api', { reason: error.code || error.name }); }
@@ -1396,14 +1429,31 @@ async function fetchDesignJsonPageUrls(state) {
     if (state.fetchedRefs.has(url)) continue;
     if (Date.now() >= state.deadline) break;
     state.fetchedRefs.add(url);
+    diagnose(state, 'design_json', { designId: context.designId || null, addressExists: true, requestSent: true, designJsonStatus: 'requesting' });
+    let responseDetails = {};
     try {
-      const response = await axios.get(url, { headers: { ...GAODING_HEADERS, Accept: 'application/json' },
-        timeout: Number(state.options.timeout) || STATIC_TIMEOUT, maxContentLength: 8 * 1024 * 1024, maxRedirects: 5, validateStatus: () => true });
-      if (response.status !== 200) { diagnose(state, 'design_json', { status: response.status, reason: 'design_json_unavailable' }); continue; }
+      let response;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          response = await axios.get(url, { headers: { ...GAODING_HEADERS, Accept: 'application/json' },
+            timeout: Math.min(Number(state.options.timeout) || STATIC_TIMEOUT, Math.max(1, state.deadline - Date.now())), maxContentLength: 8 * 1024 * 1024, maxRedirects: 5, validateStatus: () => true });
+          if (response.status < 500 && response.status !== 429) break;
+        } catch (error) { if (attempt === 2 || Date.now() >= state.deadline) throw error; }
+        if (attempt === 2 || Date.now() >= state.deadline) break;
+        diagnose(state, 'design_json', { designJsonStatus: 'retrying', attempt, status: response?.status || null });
+      }
+      const responseType = response.headers?.['content-type'] || typeof response.data;
+      responseDetails = { status: response.status, responseType };
+      if (response.status !== 200) { diagnose(state, 'design_json', { status: response.status, responseType, designJsonStatus: 'http_failed' }); continue; }
       const data = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
+      if (!data || typeof data !== 'object') throw new SyntaxError('Design response is not JSON data');
+      const before = state.candidates.length, evidenceBefore = state.evidence.length;
       collectDesignData(data, state, { ...context, path: 'design_json', source: 'design-json-pages', trusted: true });
-      diagnose(state, 'design_json', { pages: data?.pages?.length || 0, layouts: data?.layouts?.length || 0, candidates: state.candidates.length });
-    } catch (error) { diagnose(state, 'design_json', { reason: error.code || error.name }); }
+      diagnose(state, 'design_json', { status: response.status, responseType, jsonParsed: true, designJsonStatus: 'parsed', designId: context.designId || null,
+        pageCollectionFound: state.evidence.slice(evidenceBefore).some(e => /\.(?:pages|layouts)\.length$/.test(e.source)),
+        targetAssociation: state.candidates.length > before || state.evidence.length > evidenceBefore ? 'matched_reference_context' : 'unconfirmed',
+        pagesArrayCount: data?.pages?.length || 0, layoutsArrayCount: data?.layouts?.length || 0, newPageCandidates: state.candidates.length - before });
+    } catch (error) { diagnose(state, 'design_json', { ...responseDetails, jsonParsed: false, designJsonStatus: error instanceof SyntaxError ? 'parse_failed' : 'request_failed', reason: error.code || error.name }); }
   }
 }
 
@@ -1419,7 +1469,7 @@ async function finalizeState(state, linkType) {
   let validCount = 0;
   for (const candidate of ordered.slice(0, 64)) {
     if (Date.now() >= state.deadline && !state.validationCache.has(candidate.url)) break;
-    const key = `${candidate.designId || ''}|${candidate.pageKey}`;
+    const key = `${candidate.designId || ''}|${candidate.pageNumber ? `page:${candidate.pageNumber}` : candidate.pageKey}`;
     // All versions in a page group are inspected so a larger peer can win.
     if (!state.validationCache.has(candidate.url)) state.validationCache.set(candidate.url, inspectGaodingImageAsset(candidate.url));
     const asset = await state.validationCache.get(candidate.url);
@@ -1440,24 +1490,29 @@ async function finalizeState(state, linkType) {
     if ([...byPage.keys()].some(other => other !== key && other.startsWith(designPrefix))) byPage.delete(key);
   }
   let selected = [...byPage.values()].sort((a, b) => (a.pageNumber || Infinity) - (b.pageNumber || Infinity));
-  const seen = new Set();
-  selected = selected.filter(c => { if (seen.has(c.url)) return false; seen.add(c.url); return true; });
+  // Page identity wins over URL equality: different pages can reuse identical artwork.
   const count = selected.length;
   const fullPreviews = selected.every(c => c.resourceRole === 'page_preview');
-  const complete = Boolean(count && expected === count && fullPreviews && state.designIds.size <= 1);
-  const completenessStatus = complete ? 'complete' : expected ? 'partial' : 'unknown';
   const numbers = selected.map(c => c.pageNumber);
+  const numberedEvidence = state.evidence.some(e => e.numbered);
+  const numberedCoverage = !numberedEvidence || (new Set(numbers).size === expected && numbers.every(n => Number.isInteger(n) && n > 0 && n <= expected));
+  const complete = Boolean(count && expected === count && fullPreviews && numberedCoverage && state.designIds.size <= 1);
+  const completenessStatus = complete ? 'complete' : expected ? 'partial' : 'unknown';
   const canIdentifyMissing = expected && (state.evidence.some(e => e.numbered) || (numbers.length && numbers.every(n => n !== null)));
   const missingPages = !complete && canIdentifyMissing ? Array.from({ length: expected }, (_, i) => i + 1).filter(n => !numbers.includes(n)) : [];
   const pages = selected.map((c, index) => ({ page: c.pageNumber || index + 1, pageNumber: c.pageNumber, pageId: c.pageId,
     imageUrl: c.url, source: c.source, resourceRole: c.resourceRole, shareId: state.shareId, designId: c.designId || null,
     width: c.width, height: c.height, contentType: c.contentType, fileSize: c.fileSize, validationStatus: c.validationStatus,
     evidencePath: c.evidencePath, selectionReason: c.selectionReason }));
+  for (const page of pages) diagnose(state, 'page_result', { designId: page.designId, pageId: page.pageId, pageNumber: page.pageNumber,
+    source: page.source, previewValidated: true, evidencePath: page.evidencePath, selectionReason: page.selectionReason });
   const source = selected[0]?.source || null;
   diagnose(state, 'selection', { rawCandidates: state.candidates.length, fullPreviewCandidates: state.candidates.filter(c => c.resourceRole === 'page_preview').length,
     thumbnailCandidates: state.candidates.filter(c => c.resourceRole === 'page_thumbnail').length, validCandidates: validCount,
     filtered: state.candidates.filter(c => ['invalid', 'aspect_mismatch'].includes(c.validationStatus)).map(c => ({ field: c.evidencePath, reason: c.validationStatus })),
-    source, pageCount: count, expectedPageCount: expected, completenessStatus });
+    source, pageCount: count, collectedPageCount: count, expectedPageCount: expected, completenessStatus,
+    pageManifestSource: [...new Set(state.evidence.map(e => e.source))], identifiedPageIds: pages.map(p => p.pageId),
+    pageCountConfidence: expected ? 'verified' : 'unknown', identifiedPages: numbers, missingPages });
   return { success: count > 0, platform: 'Gaoding', imageUrl: selected[0]?.url || null, thumbnailUrl: selected[0]?.url || null,
     imageUrls: selected.map(c => c.url), images: selected.map(c => c.url), pages, pageCount: count, isMultiPage: count > 1,
     source, linkType, original_url: state.url, expectedPageCount: expected, collectedPageCount: count,
@@ -1466,7 +1521,7 @@ async function finalizeState(state, linkType) {
     selectionReason: count ? selected[0].selectionReason : 'no_verified_target_preview',
     status: complete ? 'success' : count ? 'preview_image' : 'preview_only',
     message: count ? undefined : state.accessRestriction === 'share_password_required' ? '该分享需要密码，当前未取得设计稿资源。' : state.accessRestriction ? '该分享已关闭或过期。' : '未获取到与该分享关联的设计稿预览；当前访问响应未提供可用资源。',
-    warningText: complete ? undefined : count ? '仅取得目标预览，设计稿完整性尚未确认。' : '分享页面可读取，但未取得目标设计稿资源。',
+    warningText: complete ? undefined : count ? expected ? `已取得 ${count}/${expected} 页，仍有页面未能验证。` : '仅取得目标预览，设计稿完整性尚未确认。' : '分享页面可读取，但未取得目标设计稿资源。',
     metadata: { inputUrl: redact(state.inputUrl || state.url), normalizedUrl: redact(state.url), resolvedUrl: redact(state.resolvedUrl),
       shareId: state.shareId, designIds: [...state.designIds], pageCountEvidence: state.evidence, diagnostics: state.diagnostics } };
 }
@@ -1496,18 +1551,154 @@ async function staticScraping(url, linkType, options = {}, state = createExtract
   return finalizeState(state, linkType);
 }
 
+// Inspect the current DOM rather than treating every image/button as a page.
+// data-preview-index and preview-item-active are emitted by DAM's multi-preview.
+async function inspectViewer(page, designIds) {
+  return page.evaluate(ids => {
+    const viewer = document.querySelector('#dam-preview-container');
+    if (!viewer) return { navigation: [], images: [], navigationTotal: null };
+    const ownerId = element => {
+      const owner = element.closest('[fileid], [data-file-id], [data-design-id]');
+      return owner?.getAttribute('fileid') || owner?.getAttribute('data-file-id') || owner?.getAttribute('data-design-id');
+    };
+    const controls = [...viewer.querySelectorAll('button[data-preview-index], button[data-page], button[data-page-number], [role="tab"][data-page-number], [role="button"][data-page-id]')];
+    const navigation = controls.map((element, index) => {
+      const id = ownerId(element) || (ids.length === 1 ? ids[0] : null);
+      if (!id || !ids.includes(id)) return null;
+      const previewIndex = element.getAttribute('data-preview-index');
+      const number = previewIndex !== null ? Number(previewIndex) + 1 : Number(element.getAttribute('data-page-number') || element.getAttribute('data-page')) || null;
+      const pageId = element.getAttribute('data-page-id');
+      if ((!Number.isInteger(number) || number <= 0) && !pageId) return null;
+      element.setAttribute('data-extraction-nav', String(index));
+      return { index, designId: id, pageNumber: number, pageId,
+        active: element.getAttribute('aria-selected') === 'true' || element.getAttribute('aria-current') === 'page' ||
+          element.classList.contains('gd-dam-space__multi-preview__preview-item-active') || element.getAttribute('data-active') === 'true',
+        previewUrl: element.querySelector('img')?.currentSrc || null };
+    }).filter(Boolean);
+    const active = navigation.find(item => item.active);
+    const images = [...viewer.querySelectorAll('img')].filter(img => {
+      if (img.closest('[data-extraction-nav]')) return false;
+      const rect = img.getBoundingClientRect();
+      return img.complete && img.naturalWidth > 0 && rect.width > 0 && rect.height > 0 && getComputedStyle(img).visibility !== 'hidden';
+    }).map(img => {
+      const id = ownerId(img) || (img.closest('[class*="file-viewer"], [data-main-preview]') && ids.length === 1 ? ids[0] : null);
+      if (!id || !ids.includes(id)) return null;
+      const pageNode = img.closest('[data-page-number], [data-page-id]');
+      return { url: img.currentSrc, designId: id, width: img.naturalWidth, height: img.naturalHeight,
+        mainPreview: Boolean(img.closest('[class*="file-viewer"], [data-main-preview], [data-page-preview]')),
+        pageId: pageNode?.getAttribute('data-page-id') || active?.pageId || null,
+        pageNumber: Number(pageNode?.getAttribute('data-page-number')) || active?.pageNumber || null };
+    }).filter(Boolean);
+    const totalNode = viewer.querySelector('[data-page-count], [data-total-pages], [aria-setsize]');
+    const declaredTotal = Number(viewer.getAttribute('data-page-count') || totalNode?.getAttribute('data-page-count') ||
+      totalNode?.getAttribute('data-total-pages') || totalNode?.getAttribute('aria-setsize')) || null;
+    // The shipped DAM component renders its entire previewUrls list, not a virtual window.
+    const damList = viewer.querySelector('.gd-dam-space__multi-preview__preview-list');
+    const navigationTotal = declaredTotal || (damList && controls.every(c => damList.contains(c) && c.hasAttribute('data-preview-index')) ? navigation.length : null);
+    return { navigation, images, navigationTotal };
+  }, designIds);
+}
+
+function addViewerSnapshot(state, image, activated = false) {
+  const url = safeImageUrl(image.url, state.resolvedUrl);
+  if (!url || /\.(?:svg|ico)(?:\?|$)/i.test(url)) return false;
+  const known = state.candidates.find(c => c.designId === image.designId && c.pageNumber === image.pageNumber && c.width && c.height);
+  const dimensions = known || (!activated && state.designDimensions.get(image.designId));
+  if (dimensions && Math.abs((image.width / image.height) / (dimensions.width / dimensions.height) - 1) > 0.08) return false;
+  const verified = activated || Boolean(dimensions);
+  state.candidates.push({ ...image, url, source: activated ? 'dynamic-page-preview' : 'dynamic-visible',
+    resourceRole: verified ? 'page_preview' : 'visible_preview', score: activated ? 800 : 200,
+    pageKey: image.pageId ? `id:${image.pageId}` : image.pageNumber ? `page:${image.pageNumber}` : 'primary',
+    evidencePath: activated ? `dom.viewer.navigation[${image.pageNumber ?? image.pageId}].main_preview` : 'dom.#dam-preview-container[fileId].img',
+    selectionReason: activated ? 'verified_active_page_snapshot' : 'target_viewer_fallback_structured_resources_unavailable' });
+  return true;
+}
+
+async function drainResponses(pending, state) {
+  let timer;
+  try {
+    await Promise.race([Promise.allSettled([...pending]), new Promise(resolve => {
+      timer = setTimeout(resolve, Math.max(1, Math.min(1500, state.deadline - Date.now())));
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
+async function collectViewerPages(page, state) {
+  let snapshot = await inspectViewer(page, [...state.designIds]);
+  // Reveal lazy navigation inside the viewer's own scroll containers, with a fixed budget.
+  for (let i = 0; i < 3 && Date.now() < state.deadline; i++) {
+    const scrolled = await page.evaluate(() => {
+      const root = document.querySelector('#dam-preview-container');
+      if (!root) return false;
+      let changed = false;
+      for (const node of [root, ...root.querySelectorAll('[class*="preview-list"], [role="tablist"], [data-page-navigation]')]) {
+        if (node.scrollHeight > node.clientHeight || node.scrollWidth > node.clientWidth) {
+          const before = `${node.scrollTop}:${node.scrollLeft}`;
+          node.scrollBy(node.clientWidth, node.clientHeight);
+          changed ||= before !== `${node.scrollTop}:${node.scrollLeft}`;
+        }
+      }
+      return changed;
+    });
+    if (!scrolled) break;
+    await page.waitForTimeout(200);
+    snapshot = await inspectViewer(page, [...state.designIds]);
+  }
+  const items = snapshot.navigation;
+  const numbers = items.map(item => item.pageNumber);
+  const distinct = new Set(numbers);
+  // Only a contiguous, explicitly numbered list establishes a total.
+  const total = snapshot.navigationTotal;
+  if (Number.isInteger(total) && total > 0 && total <= 1000 && items.length && items.every(item => item.designId === items[0].designId) && distinct.size === items.length &&
+      numbers.every(n => n > 0 && n <= total)) {
+    state.evidence.push({ count: total, source: 'dom.viewer.numbered_navigation', confidence: 'verified', numbered: true });
+  }
+  let activatedPageCount = 0, successfulPageSnapshots = 0;
+  const beforeCount = state.candidates.length;
+  for (const item of items.sort((a, b) => (a.pageNumber || Infinity) - (b.pageNumber || Infinity)).slice(0, 32)) {
+    if (Date.now() >= state.deadline) break;
+    let captured = false;
+    for (let attempt = 0; attempt < 2 && !captured && Date.now() < state.deadline; attempt++) {
+      const before = await inspectViewer(page, [...state.designIds]);
+      const target = before.navigation.find(n => n.designId === item.designId && (item.pageId ? n.pageId === item.pageId : n.pageNumber === item.pageNumber));
+      if (!target) break;
+      await page.click(`[data-extraction-nav="${target.index}"]`).catch(() => {});
+      const until = Math.min(state.deadline, Date.now() + 1800);
+      do {
+        await page.waitForTimeout(100);
+        const after = await inspectViewer(page, [...state.designIds]);
+        const active = after.navigation.find(n => n.index === target.index && n.active);
+        const matching = after.images.filter(img => img.mainPreview && img.designId === item.designId &&
+          (item.pageId ? img.pageId === item.pageId : img.pageNumber === item.pageNumber) &&
+          ((item.active && attempt === 0 && target.active) || !before.images.some(old => old.url === img.url) || (active && target.previewUrl === img.url)));
+        if (!active || matching.length !== 1) continue;
+        activatedPageCount++;
+        captured = addViewerSnapshot(state, matching[0], true);
+        if (captured) successfulPageSnapshots++;
+      } while (!captured && Date.now() < until);
+    }
+    diagnose(state, 'page_activation', { designId: item.designId, pageId: item.pageId, pageNumber: item.pageNumber,
+      activationSucceeded: captured, reason: captured ? 'active_page_preview_confirmed' : 'active_page_preview_not_confirmed' });
+    collectHtmlData(await page.content(), state, 'dynamic-html-preview');
+  }
+  diagnose(state, 'dynamic-pagination', { pageNavigationItems: items.length, navigationItemCount: items.length,
+    identifiedPageIds: items.map(item => item.pageId), activatedPageCount, successfulPageSnapshots,
+    newPageCandidates: state.candidates.length - beforeCount });
+}
+
 async function dynamicScraping(url, linkType, options = {}, state = createExtractionState(url, options)) {
   const pool = options.browserPool || getDefaultPool();
   let browser, page;
   const pending = new Set();
-  let accepting = true, readCount = 0;
+  let accepting = true, readCount = 0, relevantJsonResponses = 0;
+  const seenResponses = new Set();
   try {
     browser = await pool.acquire(10000);
     page = await browser.newPage();
     page.on('response', response => {
       const type = response.request().resourceType();
       const contentType = String(response.headers()['content-type'] || '');
-      if (!accepting || readCount >= 80 || !['document', 'fetch', 'xhr'].includes(type) || !/json|html|text\/plain/i.test(contentType)) return;
+      if (!accepting || Date.now() >= state.deadline || pending.size >= 4 || readCount >= 80 || !['document', 'fetch', 'xhr'].includes(type) || !/json|html|text\/plain/i.test(contentType)) return;
       readCount++;
       const task = (async () => {
         if (Number(response.headers()['content-length'] || 0) > 4 * 1024 * 1024) return;
@@ -1516,10 +1707,18 @@ async function dynamicScraping(url, linkType, options = {}, state = createExtrac
         if ([401, 403].includes(response.status()) && associated) diagnose(state, 'network', { url: redact(responseUrl), status: response.status(), reason: 'access_denied' });
         if (response.status() !== 200) return;
         const body = await response.text().catch(() => '');
-        if (body.length > 4 * 1024 * 1024) return;
+        if (!accepting || body.length > 4 * 1024 * 1024) return;
+        const fingerprint = responseUrl + require('crypto').createHash('sha256').update(body).digest('hex');
+        if (seenResponses.has(fingerprint)) return;
+        seenResponses.add(fingerprint);
         if (type === 'document' && responseUrl === page.url()) collectHtmlData(body, state, 'dynamic-html-preview');
         else {
-          try { collectDesignData(JSON.parse(body), state, { trusted: Boolean(associated), source: 'dynamic-network-preview', path: `network:${redact(responseUrl)}` }); }
+          try {
+            const before = state.candidates.length + state.evidence.length + state.designRefs.size;
+            const damAsset = Boolean(associated && /^\/api\/dam\/asset\/[^/]+$/.test(new URL(responseUrl).pathname));
+            collectDesignData(JSON.parse(body), state, { trusted: Boolean(associated), damAsset, source: 'dynamic-network-preview', path: `network:${redact(responseUrl)}` });
+            if (state.candidates.length + state.evidence.length + state.designRefs.size > before) relevantJsonResponses++;
+          }
           catch { /* Non-JSON network text cannot establish design ownership. */ }
         }
       })().catch(error => diagnose(state, 'network', { reason: error.code || error.name }));
@@ -1529,51 +1728,29 @@ async function dynamicScraping(url, linkType, options = {}, state = createExtrac
     await page.setViewport({ width: 1600, height: 1200 });
     await page.setUserAgent(GAODING_HEADERS['User-Agent']);
     await page.setExtraHTTPHeaders({ 'Accept-Language': GAODING_HEADERS['Accept-Language'] });
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: DYNAMIC_TIMEOUT, referer: GAODING_HEADERS.Referer });
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: Math.max(1, Math.min(DYNAMIC_TIMEOUT, state.deadline - Date.now())), referer: GAODING_HEADERS.Referer });
     state.resolvedUrl = page.url();
     await page.waitForTimeout(2000);
     await page.evaluate(() => window.scrollBy(0, Math.max(window.innerHeight, 900)));
     await page.waitForTimeout(1500);
     collectHtmlData(await page.content(), state, 'dynamic-html-preview');
-    // Bounded lazy page activation, scoped to the actual viewer rather than recommendations.
-    const buttons = await page.$$('#dam-preview-container [data-page-number], #dam-preview-container button[data-page]');
-    for (const button of buttons.slice(0, 10)) {
-      if (Date.now() >= state.deadline) break;
-      await button.click().catch(() => {}); await page.waitForTimeout(350);
-      collectHtmlData(await page.content(), state, 'dynamic-html-preview');
-    }
-    await Promise.allSettled([...pending]);
+    await collectViewerPages(page, state);
+    await drainResponses(pending, state);
+    diagnose(state, 'dynamic-network', { relevantJsonResponses, inspectedResponses: readCount });
     await fetchDesignJsonPageUrls(state);
     const current = await finalizeState(state, linkType);
     if (!current.isComplete) {
-      const visible = await page.evaluate((designIds) => {
-        const viewer = document.querySelector('#dam-preview-container');
-        if (!viewer) return [];
-        return [...viewer.querySelectorAll('img')].filter(img => img.complete && img.naturalWidth > 0 && img.getClientRects().length).map(img => {
-          const owner = img.closest('[fileid], [data-file-id], [data-design-id]');
-          const id = owner?.getAttribute('fileid') || owner?.getAttribute('data-file-id') || owner?.getAttribute('data-design-id');
-          if (!id || !designIds.includes(id)) return null;
-          const pageNode = img.closest('[data-page-number], [data-page-id]');
-          return { url: img.currentSrc, designId: id, width: img.naturalWidth, height: img.naturalHeight,
-            pageId: pageNode?.getAttribute('data-page-id'), pageNumber: Number(pageNode?.getAttribute('data-page-number')) || null };
-        }).filter(Boolean);
-      }, [...state.designIds]);
-      for (const image of visible) {
-        const url = safeImageUrl(image.url, state.resolvedUrl);
-        if (!url || /\.(?:svg|ico)(?:\?|$)/i.test(url)) continue;
-        const dimensions = state.designDimensions.get(image.designId);
-        if (dimensions && Math.abs((image.width / image.height) / (dimensions.width / dimensions.height) - 1) > 0.08) continue;
-        state.candidates.push({ ...image, url, source: 'dynamic-visible', resourceRole: dimensions ? 'page_preview' : 'visible_preview', score: 200,
-          pageKey: image.pageId ? `id:${image.pageId}` : image.pageNumber ? `page:${image.pageNumber}` : 'primary',
-          evidencePath: 'dom.#dam-preview-container[fileId].img', selectionReason: 'target_viewer_fallback_structured_resources_unavailable' });
-      }
+      const { images: visible, navigation } = await inspectViewer(page, [...state.designIds]);
+      // Failed activations may leave the previous image under the new active control.
+      // Only the verified per-page snapshot path may attribute images in paginated viewers.
+      if (!navigation.length) for (const image of visible) addViewerSnapshot(state, image);
       diagnose(state, 'dynamic-visible', { associatedViewerImages: visible.length, reason: 'structured_result_incomplete', structuredCandidates: state.candidates.filter(c => c.source !== 'dynamic-visible').length });
     }
   } catch (error) { diagnose(state, 'dynamic', { reason: error.code || error.name, message: String(error.message).slice(0, 160) }); }
   finally {
     accepting = false;
     if (page) await page.close().catch(() => {});
-    await Promise.allSettled([...pending]);
+    await drainResponses(pending, state);
     if (browser) pool.release(browser);
   }
   return finalizeState(state, linkType);
@@ -1587,7 +1764,16 @@ async function extractGaoding(inputUrl, options = {}) {
   diagnose(state, 'url', { inputUrl: redact(inputUrl), normalizedUrl: redact(url), shareId: state.shareId, linkType });
   const result = await staticScraping(url, linkType, options, state);
   if (!shouldAttemptDynamicAfterStatic(result) || linkType === 'listing' || options.staticOnly || Date.now() >= state.deadline || state.accessRestriction) return result;
-  return dynamicScraping(url, linkType, options, state);
+  const dynamic = await dynamicScraping(url, linkType, options, state);
+  if (!dynamic.isComplete && !state.accessRestriction && Date.now() < state.deadline && state.pendingAssetManifests.size) {
+    // Only re-read already discovered public endpoints, once, after the viewer had
+    // time to initialize. DAM render results may be published after the cover.
+    diagnose(state, 'manifest_refresh', { reason: 'asset_page_manifest_unconfirmed', designIds: [...state.pendingAssetManifests] });
+    await fetchPublicShareData(state, true);
+    await fetchDesignJsonPageUrls(state);
+    return finalizeState(state, linkType);
+  }
+  return dynamic;
 }
 
 module.exports = {
@@ -1613,6 +1799,7 @@ module.exports = {
     finalizeState,
     staticScraping,
     dynamicScraping,
+    fetchPublicShareData,
     safeImageUrl,
   },
 };

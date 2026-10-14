@@ -169,7 +169,7 @@ export function normalizeRecord(record = {}) {
     platform: record.platform || "Unknown",
     thumbnailUrl: preferredThumbnailUrl,
     imageUrl: preferredImageUrl,
-    imageUrls,
+    imageUrls: record.platform === 'Gaoding' && pages.length ? pages.map(page => page.imageUrl) : imageUrls,
     pages,
     pageCount,
     isMultiPage,

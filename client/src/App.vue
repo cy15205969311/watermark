@@ -334,6 +334,8 @@ function getRecordImageUrls(record) {
   addUrl(record.imageUrl)
   if (!urls.length) addUrl(record.thumbnailUrl)
 
+  const identifiedPages = (record.pages || []).filter(page => page?.shareId && page?.designId && (page.pageId || page.pageNumber) && typeof page.imageUrl === 'string' && !isBlockedPreviewAssetUrl(page.imageUrl))
+  if (identifiedPages.length) return [...identifiedPages.map(page => page.imageUrl), ...urls.filter(url => !identifiedPages.some(page => page.imageUrl === url))]
   return urls
 }
 
@@ -344,9 +346,11 @@ function normalizePages(pages, fallbackUrls = []) {
   const addPage = (imageUrl, pageNumber, details = {}) => {
     if (typeof imageUrl !== 'string') return
     const normalizedUrl = imageUrl.trim()
-    if (!normalizedUrl || isBlockedPreviewAssetUrl(normalizedUrl) || seen.has(normalizedUrl)) return
+    const identity = details.designId && (details.pageId || details.pageNumber)
+      ? `${details.designId}|${details.pageId || details.pageNumber}` : normalizedUrl
+    if (!normalizedUrl || isBlockedPreviewAssetUrl(normalizedUrl) || seen.has(identity)) return
 
-    seen.add(normalizedUrl)
+    seen.add(identity)
     normalizedPages.push({
       ...details,
       page: Number(pageNumber) || normalizedPages.length + 1,
@@ -373,7 +377,9 @@ async function downloadRecordImages(record, format = 'jpg') {
 
   for (let index = 0; index < urls.length; index += 1) {
     const url = urls[index]
-    const resource = { ...(index === 0 ? record : {}), ...((record.pages || []).find(page => page.imageUrl === url) || {}) }
+    const pageAtIndex = record.pages?.[index]
+    const page = pageAtIndex?.imageUrl === url ? pageAtIndex : (record.pages || []).find(page => page.imageUrl === url)
+    const resource = { ...(index === 0 ? record : {}), ...(page || {}) }
     const ext = resource.isAnimated === true ? resource.detectedFormat || 'gif' : format || 'jpg'
     const pageNumber = resource.page || index + 1
     const link = document.createElement('a')

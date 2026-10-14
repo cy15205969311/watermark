@@ -757,6 +757,7 @@ app.post("/api/parse", async (req, res) => {
     const normalizedStatus = normalizeRecordStatus(status);
     const normalizedPayload = normalizeExtractPayload({
       ...extractionDetails(req.body),
+      platform: resolvedPlatform,
       thumbnailUrl,
       imageUrl,
       imageUrls,

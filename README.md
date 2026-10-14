@@ -419,8 +419,16 @@ docker compose down
 - 当分享页 HTML 只有单张封面图时，会继续尝试动态页面与网络响应分析，避免多页套图被误判为单图
 - 当分享页存在 `design_info.url` 时，会继续拉取设计稿 JSON，并兼容 `pages[]` / `layouts[]` 两类结构，挑选整页预览图作为兜底结果
 - 支持多页套图返回，统一输出 `imageUrls/pages/pageCount`
-- 对稿定 / `dancf.com` 图片链接自动移除 `x-oss-process`，避免 OSS 处理参数导致资源失效
+- 对公开 DAM 资产接口中已关联目标的 `gdimage` 数据，按官方多图预览组件的 `preview_info → extends_previews` 顺序解析页面；其他扩展图片仍需要页面身份，不能直接计为新页
+- 动态采集识别官方 `data-preview-index` 导航，确认活动页和已加载主预览后逐页保存；切换失败不会将上一页重复记入结果
+- 完整性独立输出 `expectedPageCount/completenessStatus/missingPages`；已知缺页为 `partial`，无可靠总页数为 `unknown`，`dynamic-visible` 保留为关联目标的兜底
+- 空 `extends_previews` 只说明当前资产没有公开扩展预览，不能确认编辑器只有一张画板；会继续动态补全，仍无页面清单时在预算内复查一次已确认的公开分享/资产接口
+- 目标结构化资源保留原始查询和签名参数；旧 URL 辅助解析仍兼容 OSS 参数清理
 - 会过滤尺寸明显异常的局部元素小图，避免“提取成功但主图黑屏/细条图”的误判
+
+本次多页修复的原始证据、资源路径和测试结果见 [GAODING_MULTIPAGE_FIX_REPORT.md](GAODING_MULTIPAGE_FIX_REPORT.md)。稳定测试：`cd server` 后运行 `node test-gaoding.js` 和 `node --test test-gaoding-regression.js`。
+
+后续空扩展列表与多画板修复见 [GAODING_ARTBOARD_FIX_REPORT.md](GAODING_ARTBOARD_FIX_REPORT.md)。可使用 `node verify-gaoding-live.js '<分享地址>' --history --artifact-prefix=gaoding-check` 验证真实提取及隔离内存历史保存，不连接生产 MySQL。
 
 ### 本地去水印
 

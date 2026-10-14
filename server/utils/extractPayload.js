@@ -48,9 +48,17 @@ function normalizeExtractPayload(result = {}) {
   };
 
   const addPage = (page, fallbackPageNumber) => {
-    const imageUrl = addUrl(page && page.imageUrl);
+    const identifiedGaodingPage = result.platform === 'Gaoding' && page?.designId && (page.pageId || page.pageNumber);
+    const rawUrl = typeof page?.imageUrl === 'string' ? page.imageUrl.trim() : '';
+    const imageUrl = identifiedGaodingPage && rawUrl && !isBlockedPreviewAssetUrl(rawUrl) ? rawUrl : addUrl(rawUrl);
     if (!imageUrl) {
       return;
+    }
+    if (identifiedGaodingPage) {
+      const identity = `${page.designId}|${page.pageId || page.pageNumber}`;
+      if (pages.some(p => `${p.designId}|${p.pageId || p.pageNumber}` === identity)) return;
+      urls.push(imageUrl);
+      seen.add(imageUrl);
     }
 
     pages.push({
@@ -76,16 +84,17 @@ function normalizeExtractPayload(result = {}) {
   }
 
   pages.sort((a, b) => a.page - b.page);
+  const orderedUrls = result.platform === 'Gaoding' && pages.length ? pages.map(p => p.imageUrl) : urls;
   return {
     ...result,
-    imageUrl: urls[0] || null,
+    imageUrl: orderedUrls[0] || null,
     thumbnailUrl: result.thumbnailUrl || result.imageUrl || urls[0] || null,
-    imageUrls: urls,
-    images: urls,
+    imageUrls: orderedUrls,
+    images: orderedUrls,
     pages,
-    pageCount: urls.length,
+    pageCount: orderedUrls.length,
     isMultiPage:
-      typeof result.isMultiPage === "boolean"
+      result.platform === 'Gaoding' ? orderedUrls.length > 1 : typeof result.isMultiPage === "boolean"
         ? result.isMultiPage
         : urls.length > 1,
   };
