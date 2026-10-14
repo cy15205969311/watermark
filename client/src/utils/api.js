@@ -25,7 +25,9 @@ function normalizeApiBaseUrl(value) {
 }
 
 export const API_BASE_URL = normalizeApiBaseUrl(
-  typeof import.meta !== "undefined" ? import.meta.env.VITE_API_BASE_URL : ""
+  typeof window !== "undefined" && window.desktop?.apiBaseUrl
+    ? window.desktop.apiBaseUrl
+    : typeof import.meta !== "undefined" ? import.meta.env.VITE_API_BASE_URL : ""
 );
 
 export function buildApiUrl(path = "") {

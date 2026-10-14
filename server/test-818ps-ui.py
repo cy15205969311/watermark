@@ -60,7 +60,7 @@ with sync_playwright() as p:
     page = context.new_page()
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
-    page.goto("http://127.0.0.1:5179")
+    page.goto(os.environ.get("TEST_UI_BASE_URL", "http://127.0.0.1:5179"))
     page.wait_for_load_state("networkidle")
     cards = page.locator(".history-item")
     assert cards.count() == 5, "old and new history must render"

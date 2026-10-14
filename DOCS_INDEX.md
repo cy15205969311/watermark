@@ -1,5 +1,9 @@
 # 文档索引
 
+- [DESKTOP_GUIDE.md](DESKTOP_GUIDE.md)：Windows 个人版安装、开发、打包、双数据库隔离、数据备份与排障。
+- [DESKTOP_DELIVERY_REPORT.md](DESKTOP_DELIVERY_REPORT.md)：实际安装包信息、阶段修改、测试证据及发布前未完成验收。
+- [DESKTOP_IMPLEMENTATION_PLAN.md](DESKTOP_IMPLEMENTATION_PLAN.md)：桌面改造前的结构分析与最小方案。
+
 - `README.md`: 项目总览、环境配置、接口说明、平台能力、联调与排障入口，作为默认开发入口文档。
 - `PROJECT_ARCHITECTURE.md`: 当前仓库的真实目录结构、模块职责、浏览器服务与提取链路分层说明，适合新成员快速建立代码认知。
 - `PLATFORM_EXTRACTION_LOGIC_FOR_PYTHON.md`: 当前项目中图怪兽 / 创客贴 / 稿定设计 / 花瓣网四个平台提取链路的总览文档，重点覆盖真实调用链、候选图筛选、多页识别、结果归一化和 Python 迁移建议。

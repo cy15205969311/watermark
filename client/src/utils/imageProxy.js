@@ -37,6 +37,15 @@ export function shouldUseImageProxy(url = "") {
 }
 
 export function toClientImageUrl(url = "") {
+  // Uploaded files survive a desktop restart with a new loopback port.
+  if (typeof window !== 'undefined' && window.desktop?.apiBaseUrl && typeof url === 'string') {
+    try {
+      const old = new URL(url);
+      if (['127.0.0.1', 'localhost'].includes(old.hostname) && old.pathname.startsWith('/uploads/')) {
+        return `${new URL(window.desktop.apiBaseUrl).origin}${old.pathname}`;
+      }
+    } catch {}
+  }
   if (!shouldUseImageProxy(url)) {
     return typeof url === "string" ? url.trim() : "";
   }

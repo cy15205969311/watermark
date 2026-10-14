@@ -13,7 +13,7 @@
 
 const puppeteer = require('puppeteer');
 const { autoScroll } = require('../utils/autoScroll');
-const { withPuppeteerExecutablePath } = require('../utils/puppeteer-launch');
+const { withPuppeteerExecutablePath, launchTracked } = require('../utils/puppeteer-launch');
 
 /**
  * 图片过滤规则
@@ -273,7 +273,7 @@ async function extractImages(url, options = {}) {
   try {
     // 1. 启动浏览器
     console.log('  🌐 启动浏览器...');
-    browser = await puppeteer.launch(
+    browser = await launchTracked(puppeteer,
       withPuppeteerExecutablePath({
         headless: config.headless ? 'new' : false,
         args: [

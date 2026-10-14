@@ -13,6 +13,7 @@ const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 const {
   getPuppeteerExecutablePath,
   withPuppeteerExecutablePath,
+  launchTracked,
 } = require("../utils/puppeteer-launch");
 
 puppeteer.use(StealthPlugin());
@@ -27,6 +28,7 @@ class BrowserPool {
     this.creating = 0;
     this.launchOptions = options.launchOptions || {};
     this.initialized = false;
+    this.closing = false;
 
     console.log(
       `🔧 浏览器池配置: min=${this.minInstances}, max=${this.maxInstances}`
@@ -65,7 +67,7 @@ class BrowserPool {
    * @private
    */
   async _createBrowser() {
-    const browser = await puppeteer.launch(
+    const browser = await launchTracked(puppeteer,
       withPuppeteerExecutablePath({
         headless: "new",
         args: [
@@ -89,6 +91,8 @@ class BrowserPool {
    * 如果没有可用实例且未达上限，则创建新实例
    */
   async acquire(timeoutMs = 10000) {
+    if (this.closing) throw new Error('browser_pool_closed');
+    this.instances = this.instances.filter(browser => browser.isConnected());
     // 如果有可用实例，直接返回
     if (this.instances.length > 0) {
       const browser = this.instances.pop();
@@ -123,6 +127,7 @@ class BrowserPool {
     );
     return new Promise((resolve, reject) => {
       const waiter = (browser) => { clearTimeout(timer); resolve(browser); };
+      waiter.cancel = () => { clearTimeout(timer); reject(new Error('browser_pool_closed')); };
       const timer = setTimeout(() => {
         this.waiting = this.waiting.filter(item => item !== waiter);
         reject(new Error("browser_pool_acquire_timeout"));
@@ -137,6 +142,7 @@ class BrowserPool {
   release(browser) {
     if (!this.inUse.has(browser)) return;
     this.inUse.delete(browser);
+    if (this.closing || !browser.isConnected()) { browser.close().catch(() => {}); return; }
 
     // 如果有等待的请求，分配给它
     if (this.waiting.length > 0) {
@@ -155,13 +161,16 @@ class BrowserPool {
    * 关闭所有实例
    */
   async closeAll() {
+    this.closing = true;
+    this.waiting.forEach(waiter => waiter.cancel?.());
+    this.waiting = [];
     console.log(`🛑 关闭所有浏览器实例...`);
 
     const allBrowsers = [...this.instances, ...this.inUse];
 
     for (const browser of allBrowsers) {
       try {
-        await browser.close();
+        if (browser.isConnected()) await browser.close();
       } catch (error) {
         console.warn(`⚠️ 关闭实例异常: ${error.message}`);
       }

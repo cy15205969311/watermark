@@ -2,7 +2,8 @@ import { defineConfig, loadEnv } from "vite";
 import vue from "@vitejs/plugin-vue";
 
 export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), "");
+  // Desktop builds must not inherit a deployed API URL or server credentials.
+  const env = mode === 'desktop' ? {} : loadEnv(mode, process.cwd(), "");
   const host = env.VITE_HOST || "0.0.0.0";
   const port = Number(env.VITE_PORT || 5173);
   const previewPort = Number(env.VITE_PREVIEW_PORT || 4173);
@@ -11,6 +12,9 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [vue()],
+    envDir: mode === 'desktop' ? false : undefined,
+    ...(mode === 'desktop' ? { define: { 'import.meta.env.VITE_API_BASE_URL': JSON.stringify('/api') } } : {}),
+    ...(mode === 'desktop' ? { esbuild: { drop: ['console'] } } : {}),
     server: {
       host,
       port,

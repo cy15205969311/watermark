@@ -15,7 +15,7 @@ if (typeof global.Blob === "undefined") {
 }
 
 const express = require("express");
-const mysql = require("mysql2/promise");
+const runtime = require("./runtime").getRuntime();
 const cors = require("cors");
 const axios = require("axios");
 const fs = require("fs");
@@ -67,12 +67,13 @@ function loadServerEnvFiles() {
   return loadedFiles;
 }
 
-const loadedEnvFiles = loadServerEnvFiles();
+const loadedEnvFiles = runtime.mode === "desktop" ? [] : loadServerEnvFiles();
 
 const app = express();
 let PORT = parseInt(process.env.PORT || 3000);
 const HOST = String(process.env.HOST || "0.0.0.0").trim() || "0.0.0.0";
-app.set("trust proxy", true);
+app.set("trust proxy", runtime.mode !== "desktop");
+if (runtime.guard) app.use(runtime.guard);
 
 function getServerAccessUrls(host, port) {
   const normalizedHost = String(host || "").trim();
@@ -107,7 +108,7 @@ function getServerAccessUrls(host, port) {
 // 中间件 - 增强 CORS 配置
 app.use(
   cors({
-    origin: "*",
+    origin: runtime.mode === "desktop" ? false : "*",
     methods: ["GET", "POST", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   })
@@ -116,7 +117,7 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
 // 静态托管 uploads 目录（上传的图片将保存在这里）
-const uploadsDir = path.join(__dirname, "uploads");
+const uploadsDir = path.join(runtime.dataDirectory || __dirname, "uploads");
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
@@ -503,15 +504,15 @@ const missingDbConfigKeys = Object.entries({
   .filter(([, value]) => value === "")
   .map(([key]) => key);
 
-if (loadedEnvFiles.length > 0) {
+if (runtime.mode !== "desktop" && loadedEnvFiles.length > 0) {
   console.log(`Loaded env files: ${loadedEnvFiles.join(", ")}`);
-} else {
+} else if (runtime.mode !== "desktop") {
   console.warn(
     "No server env file found. Create server/.env or provide DB_* environment variables."
   );
 }
 
-if (missingDbConfigKeys.length > 0) {
+if (runtime.mode !== "desktop" && missingDbConfigKeys.length > 0) {
   console.warn(
     `Missing database env vars: ${missingDbConfigKeys.join(
       ", "
@@ -519,51 +520,25 @@ if (missingDbConfigKeys.length > 0) {
   );
 }
 
-const pool = mysql.createPool({
-  ...dbConfig,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
+const pool = runtime.database === "sqlite"
+  ? require("./database/sqlite").createDatabase(runtime.databasePath)
+  : require("./database/mysql").createDatabase(dbConfig);
+
+const databaseReady = pool.getConnection().then(async conn => {
+  conn.release();
+  if (runtime.database === "mysql") await ensureParseRecordColumns();
+  console.log(`数据库已就绪: ${runtime.database}`);
 });
-
-// 测试数据库连接
-pool
-  .getConnection()
-  .then((conn) => {
-    console.log("✅ 成功连接到 MySQL 数据库");
-    conn.release();
-  })
-  .catch((err) => {
-    console.error("❌ 数据库连接失败:", err.message);
-  });
-
-// 【新增】初始化浏览器池（支持 Puppeteer 隐身抓取）
-ensureParseRecordColumns().catch((err) => {
-  console.warn("⚠️ parse_records 多页字段检查失败:", err.message);
+const browserReady = initDefaultPool().then(browserPool => {
+  const status = browserPool?.getStatus?.();
+  if (runtime.mode === "desktop" && (!status || status.available < 1)) {
+    throw new Error("浏览器初始化失败：随包 Chromium 无可用实例，请查看桌面日志");
+  }
+  return browserPool;
 });
-
-initDefaultPool()
-  .then((browserPool) => {
-    const status =
-      browserPool && typeof browserPool.getStatus === "function"
-        ? browserPool.getStatus()
-        : null;
-
-    if (status && status.available > 0) {
-      console.log("✅ 浏览器池初始化成功，已预热 Puppeteer 实例");
-      return;
-    }
-
-    console.warn(
-      "⚠️ 浏览器池已初始化但没有可用实例，请检查 PUPPETEER_EXECUTABLE_PATH 或系统依赖库"
-    );
-  })
-  .catch((err) => {
-    console.warn(
-      "⚠️ 浏览器池初始化失败（非致命错误），将在需要时启动:",
-      err.message
-    );
-  });
+const ready = Promise.all([databaseReady, browserReady]);
+// Server retains its existing nonfatal background initialization behavior.
+ready.catch(error => console.error("启动依赖初始化失败:", error.message));
 
 // API 路由
 
@@ -655,6 +630,7 @@ function getRequestClientIp(req) {
 }
 
 async function ensureParseRecordColumns() {
+  if (runtime.database !== "mysql") return;
   const requiredColumns = {
     image_urls_json: "LONGTEXT NULL",
     pages_json: "LONGTEXT NULL",
@@ -714,7 +690,7 @@ app.get("/api/history", async (req, res) => {
     res.json({ success: true, data: rows.map(restoreRecord) });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ success: false, message: "数据库错误" });
+    res.status(500).json({ success: false, message: runtime.mode === "desktop" ? error.message : "数据库错误" });
   }
 });
 
@@ -819,7 +795,7 @@ app.post("/api/parse", async (req, res) => {
     });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ success: false, message: "保存记录失败" });
+    res.status(500).json({ success: false, message: runtime.mode === "desktop" ? error.message : "保存记录失败" });
   }
 });
 
@@ -837,7 +813,7 @@ app.delete("/api/history/:id", async (req, res) => {
     ]);
     res.json({ success: true, message: "记录已删除" });
   } catch (error) {
-    res.status(500).json({ success: false, message: "数据库错误" });
+    res.status(500).json({ success: false, message: runtime.mode === "desktop" ? error.message : "数据库错误" });
   }
 });
 
@@ -856,7 +832,7 @@ app.get("/api/history/search", async (req, res) => {
     );
     res.json({ success: true, data: rows.map(restoreRecord) });
   } catch (error) {
-    res.status(500).json({ success: false, message: "搜索失败" });
+    res.status(500).json({ success: false, message: runtime.mode === "desktop" ? error.message : "搜索失败" });
   }
 });
 
@@ -996,4 +972,4 @@ function startServer(port) {
 }
 
 if (require.main === module) startServer(PORT);
-module.exports = { app, ensureParseRecordColumns };
+module.exports = { app, ensureParseRecordColumns, ready, closeDatabase: () => pool.end() };

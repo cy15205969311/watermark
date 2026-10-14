@@ -1,0 +1,26 @@
+{
+  "name": "watermark-desktop-build",
+  "private": true,
+  "version": "1.0.0",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "description": "Windows desktop build tooling; server remains independent",
+  "scripts": {
+    "desktop:prepare": "node desktop/scripts/prepare.cjs",
+    "desktop:dev": "npm run desktop:prepare && electron desktop/main.cjs",
+    "desktop:dir": "npm run desktop:prepare && electron-builder --config desktop/builder.cjs --win --x64 --dir",
+    "desktop:dist": "npm run desktop:prepare && electron-builder --config desktop/builder.cjs --win nsis --x64",
+    "test:desktop": "electron desktop/tests/run.cjs",
+    "test:desktop:main": "node desktop/scripts/main-smoke.cjs",
+    "test:desktop:package": "node desktop/tests/package-inspect.cjs && node desktop/tests/packaged.cjs",
+    "test:desktop:nsis": "powershell -NoProfile -ExecutionPolicy Bypass -File desktop/tests/nsis.ps1",
+    "test:mysql": "node desktop/scripts/mysql-regression.cjs",
+    "test:mysql:live": "node desktop/tests/mysql-live.cjs"
+  },
+  "devDependencies": {
+    "electron": "44.7.2",
+    "electron-builder": "26.15.3",
+    "playwright": "1.62.1"
+  }
+}

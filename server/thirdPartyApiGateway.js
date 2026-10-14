@@ -20,12 +20,12 @@ function isTransientError(error) {
 
 // ====== API 提供商配置 ======
 
-// 1. kk.tsgpt.top - 用户已有的 token
+// 1. kk.tsgpt.top - credentials must come from explicit configuration.
 const TSGPT_API = {
   name: "TSGPT",
   baseUrl: "https://kk.tsgpt.top/tgs/info/",
-  token: process.env.TSGPT_TOKEN || "OflDpfIKZrH8",
-  enabled: true,
+  get token() { return process.env.TSGPT_TOKEN || ""; },
+  get enabled() { return Boolean(process.env.TSGPT_TOKEN); },
   priority: 1, // 优先级越高越先调用
 };
 

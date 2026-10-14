@@ -9,6 +9,7 @@ function generateClientId() {
 }
 
 export function getClientId() {
+  if (typeof window !== "undefined" && window.desktop?.clientId) return window.desktop.clientId;
   if (typeof window === "undefined" || !window.localStorage) {
     return "server-render";
   }

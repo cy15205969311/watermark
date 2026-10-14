@@ -1,12 +1,12 @@
 // server/services/browser.js
 const puppeteer = require("puppeteer-extra");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
-const { withPuppeteerExecutablePath } = require("../utils/puppeteer-launch");
+const { withPuppeteerExecutablePath, launchTracked } = require("../utils/puppeteer-launch");
 
 puppeteer.use(StealthPlugin());
 
 function launchBrowser(launchOptions) {
-  return puppeteer.launch(withPuppeteerExecutablePath(launchOptions));
+  return launchTracked(puppeteer, withPuppeteerExecutablePath(launchOptions));
 }
 
 async function scrapeWithBrowser(targetUrl) {

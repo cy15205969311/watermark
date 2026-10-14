@@ -226,7 +226,7 @@ export default createStore({
         }
       } catch (error) {
         console.error("获取历史记录失败:", error);
-        commit("SET_ERROR", error.message);
+        commit("SET_ERROR", error.response?.data?.message || error.message);
       }
     },
 
@@ -271,7 +271,8 @@ export default createStore({
         await api.delete(`/history/${id}`);
         commit("REMOVE_RECORD", id);
       } catch (error) {
-        commit("SET_ERROR", "删除失败");
+        commit("SET_ERROR", error.response?.data?.message || "删除失败");
+        throw error;
       }
     },
   },

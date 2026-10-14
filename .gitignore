@@ -81,3 +81,5 @@ server/818ps-observed*
 server/818ps-test-run.log
 server/818ps-live-*.log
 server/test-artifacts/
+.desktop-build/
+release/

@@ -11,7 +11,7 @@
 
 const puppeteer = require('puppeteer');
 const { smartScroll } = require('../utils/autoScroll');
-const { withPuppeteerExecutablePath } = require('../utils/puppeteer-launch');
+const { withPuppeteerExecutablePath, launchTracked } = require('../utils/puppeteer-launch');
 
 /**
  * Canva 图片过滤规则
@@ -53,7 +53,7 @@ async function extractCanva(url, options = {}) {
   let browser = null;
 
   try {
-    browser = await puppeteer.launch(
+    browser = await launchTracked(puppeteer,
       withPuppeteerExecutablePath({
         headless: config.headless ? 'new' : false,
         args: ['--no-sandbox', '--disable-setuid-sandbox']

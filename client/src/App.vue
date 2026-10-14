@@ -387,6 +387,11 @@ async function downloadRecordImages(record, format = 'jpg') {
     link.download = urls.length > 1
       ? `download-${record.id}-p${pageNumber}.${ext}`
       : `download-${record.id}.${ext}`
+    if (window.desktop?.saveResource) {
+      const result = await window.desktop.saveResource(url, link.download)
+      if (result?.canceled) break
+      continue
+    }
     if (!url.startsWith('data:') && new URL(url, location.href).origin !== location.origin) link.target = '_blank'
     link.rel = 'noopener noreferrer'
     document.body.appendChild(link)
@@ -779,7 +784,7 @@ const handleParse = async () => {
     inputUrl.value = ''
   } catch (err) {
     console.error('❌ 解析失败:', err)
-    store.commit('SET_ERROR', err.message || '解析失败，请重试')
+    store.commit('SET_ERROR', err.response?.data?.message || err.message || '解析失败，请重试')
   } finally {
     store.commit('SET_LOADING', false)
   }

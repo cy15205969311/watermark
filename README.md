@@ -2,6 +2,8 @@
 
 一个基于 Vue 3 + Node.js + MySQL + Puppeteer 的图片/设计稿提取与本地去水印项目。
 
+新增 Windows 桌面个人版（Electron + SQLite），原服务器版仍默认 MySQL、保留 `cd server && npm start`。安装、开发、打包、数据备份见 [桌面版指南](DESKTOP_GUIDE.md)，实际测试与未完成验收见 [交付报告](DESKTOP_DELIVERY_REPORT.md)。
+
 项目当前分成两条主线能力：
 
 - 在线链接解析：从设计平台或内容平台链接中提取真实图片地址，支持单图和多页套图。
