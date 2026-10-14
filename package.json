@@ -1,7 +1,7 @@
 {
   "name": "watermark-desktop-build",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.1",
   "engines": {
     "node": ">=22.13.0"
   },
@@ -16,7 +16,9 @@
     "test:desktop:package": "node desktop/tests/package-inspect.cjs && node desktop/tests/packaged.cjs",
     "test:desktop:nsis": "powershell -NoProfile -ExecutionPolicy Bypass -File desktop/tests/nsis.ps1",
     "test:mysql": "node desktop/scripts/mysql-regression.cjs",
-    "test:mysql:live": "node desktop/tests/mysql-live.cjs"
+    "test:mysql:live": "node desktop/tests/mysql-live.cjs",
+    "test:desktop:installer": "node --test desktop/tests/installer-policy.cjs",
+    "test:desktop:installer:native": "node desktop/tests/installer-native.cjs"
   },
   "devDependencies": {
     "electron": "44.7.2",

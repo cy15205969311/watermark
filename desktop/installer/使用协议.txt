@@ -1,0 +1,43 @@
+﻿去水印下载助手个人版 — 安装使用说明
+版本 1.1.1
+
+本说明用于告知安装和使用行为，不替代项目原有 MIT 许可证，不限制该许可证授予的使用、修改、分发和商业使用权利，也不改变第三方组件的许可证。本文不是额外的排他性终端用户许可协议。发布前仍建议由项目权利人及法律专业人员审阅措辞与版权归属。
+
+1. 使用与权限
+本软件用于解析链接、预览和下载可访问的设计资源。使用者应自行确认对内容的处理、使用及传播权限，并遵守外部服务的访问条件。本软件不授予任何第三方作品权利，也不保证所有链接都能提取完整页面或无水印资源。
+
+2. 外部服务
+提取结果依赖第三方网站、公开数据、登录状态、资源签名有效期及网络条件。外部服务变化可能导致失败、缺页或功能暂不可用；请核对结果及完整性提示。
+
+3. 本地数据
+每个 Windows 账户的数据保存在该账户的 AppData/Roaming/DesignExtractorPersonal 下。安装目录与数据目录分离，升级和默认卸载保留历史记录、上传文件及配置。请自行备份重要数据。此安装器不自动导入、清空或迁移服务器 MySQL 数据。
+
+4. 免责与开源许可
+软件按“原样”提供，不提供适销性、特定用途适用性或不侵权的明示或默示担保。责任限制以如下 MIT 许可证及适用法律为准。不存在任何安全认证、平台授权或 Windows 安全信誉承诺。
+
+5. 第三方许可
+安装目录 resources/licenses 提供依赖许可清单及已发现的 LICENSE、COPYING 和 NOTICE 文本；Electron 与其 Chromium 许可随程序提供，随包 Chrome 的许可在其自身资源中保留。第三方组件始终遵循各自许可证。清单基于实际打包依赖生成，发布前仍需审阅完整性。
+
+项目 MIT 许可证原文：
+
+MIT License
+
+Copyright (c) watermark project contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

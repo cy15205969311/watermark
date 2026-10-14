@@ -2,6 +2,17 @@ const path = require('node:path');
 module.exports = {
   appId: 'com.designextractor.personal', productName: '去水印下载助手',
   electronDist: path.resolve(__dirname, '../node_modules/electron/dist'),
+  afterPack: async context => {
+    // Windows scanners can briefly lock a freshly copied EXE before resource
+    // editing. Wait finitely; never disable security software or skip metadata.
+    const fs = require('node:fs/promises');
+    const executable = path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.exe`);
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    for (let attempt = 0; ; attempt++) {
+      try { const handle = await fs.open(executable, 'r+'); await handle.close(); break; }
+      catch (error) { if (!['EBUSY', 'EPERM'].includes(error.code) || attempt >= 12) throw error; await new Promise(resolve => setTimeout(resolve, 250)); }
+    }
+  },
   directories: { app: '.desktop-build/app', output: 'release' },
   artifactName: 'DesignExtractor-Personal-${version}-${arch}-Setup.${ext}',
   asar: true, asarUnpack: ['**/*.node', '**/node_modules/@img/**'],

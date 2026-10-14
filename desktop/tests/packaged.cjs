@@ -5,12 +5,17 @@ const path = require('node:path');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const { spawnSync } = require('node:child_process');
+const asar = require('@electron/asar');
 const root = path.resolve(__dirname, '../..');
 const installed = process.argv.find(arg => arg.startsWith('--installed='))?.slice(12);
 const destination = installed ? path.resolve(installed) : fs.mkdtempSync(path.join(root, '.desktop-build', '安装 中文 Path '));
 if (!destination.startsWith(path.join(root, '.desktop-build') + path.sep)) throw new Error('Test install must be inside build workspace');
 if (!installed) fs.cpSync(path.join(root, 'release/win-unpacked'), destination, { recursive: true });
-const executable = path.join(destination, '设计稿提取助手.exe');
+const executable = path.join(destination, '去水印下载助手.exe');
+// No daily-user history/config writes during package smoke. For a copied test
+// bundle only, install a bootstrap BEFORE the unchanged production entry.
+// Installed targets are permitted solely by the disposable NSIS test runner.
+const isolatedProfile = fs.mkdtempSync(path.join(root, '.desktop-build', 'package-profile-'));
 const results = [];
 let application;
 let beforeIds;
@@ -19,7 +24,7 @@ let origin;
 async function launch() {
   const minimalPath = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
   application = await electron.launch({ executablePath: executable, env: { ...process.env, PATH: minimalPath, DB_HOST: 'must-not-connect.invalid', PUPPETEER_EXECUTABLE_PATH: 'missing-global-chrome.exe' }, timeout: 60000 });
-  const page = await application.firstWindow(); await page.waitForLoadState('networkidle');
+  const page = await application.firstWindow({ timeout: 20000 }); await page.waitForLoadState('networkidle');
   const info = await application.evaluate(({ app }) => {
     const load = process.getBuiltinModule('node:module').createRequire(app.getAppPath() + '/package.json');
     const runtime = load('./server/runtime.js').getRuntime();
@@ -40,14 +45,35 @@ async function shutdown() {
   if (!application) return;
   const child = application.process();
   const closed = new Promise(resolve => child.once('exit', resolve));
-  await application.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0].close(); }).catch(() => {});
+  await application.evaluate(({ BrowserWindow, app }) => { const first = BrowserWindow.getAllWindows()[0]; if (first) first.close(); else app.quit(); }).catch(() => {});
   let timer;
   try { await Promise.race([closed, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Packaged shutdown timeout')), 20000); })]); }
   finally { clearTimeout(timer); }
   application = null;
 }
 async function run() {
+  if (!installed) {
+    const archive = path.join(destination, 'resources/app.asar');
+    const extracted = path.join(destination, 'test-bundle-source');
+    asar.extractAll(archive, extracted);
+    const manifestFile = path.join(extracted, 'package.json');
+    const manifest = JSON.parse(fs.readFileSync(manifestFile));
+    const originalEntry = manifest.main;
+    manifest.main = 'isolated-test-bootstrap.cjs';
+    fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2));
+    fs.mkdirSync(isolatedProfile, { recursive: true });
+    fs.writeFileSync(path.join(extracted, manifest.main), `require('electron').app.setPath('appData', ${JSON.stringify(isolatedProfile)});\nrequire('./' + ${JSON.stringify(originalEntry)});\n`);
+    await asar.createPackageWithOptions(extracted, archive, { unpack: '*.node', unpackDir: path.join('node_modules', '@img') });
+    // Repacked test ASAR differs from the production header hash. Disable its
+    // validation ONLY on this task-owned executable copy; release stays intact.
+    const { flipFuses, FuseVersion, FuseV1Options } = require('@electron/fuses');
+    await flipFuses(executable, { version: FuseVersion.V1, [FuseV1Options.EnableEmbeddedAsarIntegrityValidation]: false });
+    results.push({ name: 'Instrumented copy isolates appData; release archive/executable unchanged', isolatedProfile, testCopyAsarIntegrityValidation: false });
+  } else if (!process.argv.includes('--disposable-environment')) {
+    throw new Error('Installed-app smoke requires an explicitly disposable environment');
+  }
   const first = await launch();
+  if (!installed) assert.ok(first.info.userData.startsWith(isolatedProfile + path.sep));
   results.push({ name: 'Packaged app runs with Chinese/space installation path and no Node/Chrome on PATH', info: first.info });
   const history = await request(first.page, '/history'); beforeIds = history.data.data.map(record => record.id);
   const p1 = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aOwAAAABJRU5ErkJggg==';
@@ -87,7 +113,7 @@ async function run() {
 run().catch(async error => {
   console.error(error);
   if (application) {
-    try { const page = await application.firstWindow(); for (const id of createdIds) await request(page, `/history/${id}`, { method: 'DELETE' }); } catch {}
+    try { const page = application.windows()[0]; if (page) for (const id of createdIds) await request(page, `/history/${id}`, { method: 'DELETE' }); } catch {}
     await shutdown().catch(() => application?.process().kill());
   }
   process.exitCode = 1;

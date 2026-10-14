@@ -55,7 +55,7 @@ async function prepare() {
   }
   const serverPackage = JSON.parse(fs.readFileSync(path.join(root, 'server/package.json')));
   const appPackage = { name: 'design-extractor-personal', version: JSON.parse(fs.readFileSync(path.join(root, 'package.json'))).version, main: 'desktop/main.cjs',
-    description: '设计稿提取助手 Windows 个人版', author: 'Design Extractor', private: true, dependencies: serverPackage.dependencies };
+    description: '去水印下载助手 Windows 个人版', author: 'Design Extractor', private: true, dependencies: serverPackage.dependencies };
   fs.writeFileSync(path.join(application, 'package.json'), JSON.stringify(appPackage, null, 2));
   const lock = JSON.parse(fs.readFileSync(path.join(root, 'server/package-lock.json')));
   lock.name = appPackage.name; lock.version = appPackage.version;
@@ -91,6 +91,8 @@ async function prepare() {
   fs.writeFileSync(path.join(root, 'desktop/assets/icon.ico'), icon);
   fs.mkdirSync(path.join(application, 'desktop/assets'), { recursive: true });
   fs.writeFileSync(path.join(application, 'desktop/assets/icon.ico'), icon);
+  require('./notices.cjs').generateNotices(root, application);
+  require('./nsis-templates.cjs').prepareNsisTemplates(root);
   console.log('Desktop staged', { application, chromeVersion: buildId, puppeteerVersion: require(path.join(application, 'node_modules/puppeteer/package.json')).version });
 }
 prepare().catch(error => { console.error(error); process.exitCode = 1; });

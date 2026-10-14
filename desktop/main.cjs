@@ -103,7 +103,7 @@ else {
       } catch (error) { item.cancel(); console.error('保存文件失败', error.message); }
     });
     window = new BrowserWindow({ width: 1280, height: 860, minWidth: 900, minHeight: 650, show: false,
-      title: '设计稿提取助手 · 个人版', icon: path.join(__dirname, 'assets', 'icon.ico'),
+      title: '去水印下载助手 · 个人版', icon: path.join(__dirname, 'assets', 'icon.ico'),
       webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, session: desktopSession },
     });
     window.on('query-session-end', () => app.quit());
@@ -121,7 +121,7 @@ else {
     window.show();
   }).catch(async error => {
     console.error('桌面启动失败', error.message);
-    await dialog.showMessageBox({ type: 'error', title: '无法启动设计稿提取助手', message: sanitize(error.message), detail: '历史记录保留在用户数据目录。请检查磁盘空间、资源文件和日志后重试。' });
+    await dialog.showMessageBox({ type: 'error', title: '无法启动去水印下载助手', message: sanitize(error.message), detail: '历史记录保留在用户数据目录。请检查磁盘空间、资源文件和日志后重试。' });
     app.quit();
   });
   process.on('uncaughtException', error => { console.error('未处理异常', error.message); app.quit(); });

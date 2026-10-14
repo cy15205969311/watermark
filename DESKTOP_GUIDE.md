@@ -4,9 +4,15 @@
 
 ## 普通用户
 
-运行 `release/DesignExtractor-Personal-1.0.0-x64-Setup.exe`。安装器为 Windows x64 NSIS，默认按用户安装，允许选择目录，创建开始菜单和桌面快捷方式。关闭窗口即退出应用，不隐藏到托盘。首次启动会初始化数据库并预热随包浏览器，后端健康检查成功后才显示操作界面。
+运行候选包 `release/DesignExtractor-Personal-1.1.1-x64-Setup.exe`。产品显示名称为“去水印下载助手”。安装器配置为简体中文向导：欢迎、接受安装使用说明、安装范围、安装目录、快捷方式、安装进度、完成。默认仅为当前用户安装，开始菜单快捷方式默认开启，桌面快捷方式可选；完成页可选择立即启动。新版向导实际页面尚待人工验收，不能将配置检查当作界面验收通过。关闭窗口即退出应用，不隐藏到托盘。首次启动会初始化数据库并预热随包浏览器，后端健康检查成功后才显示操作界面。
 
-本次产物尚未代码签名；开发机已验证安装、使用、同版本覆盖安装和卸载，干净 Windows 10/11 与不同版本升级验收仍待执行。详见 [交付报告](DESKTOP_DELIVERY_REPORT.md)。
+1.1.1 未签名，按用户选择先交付候选包，本轮不执行真实安装、升级、卸载。目录规范化与范围冲突已通过编译后的原生 NSIS 测试；真实向导截图、UAC、两种范围安装、多账户隔离及干净 Windows 10/11 均未验收。详见 [1.1.1 候选包报告](DESKTOP_1.1.1_REPORT.md)。1.1.0 的开发机安装记录仅作为旧版基线，不代替新版验收。
+
+当前用户默认目录为 `%LOCALAPPDATA%/Programs/DesignExtractor Personal`；所有用户默认目录为 `%ProgramFiles%/DesignExtractor Personal`，必要时由 Windows 请求管理员权限。升级默认沿用同范围已登记目录。切换范围时默认目录同步，自定义目录保留并重新校验。目录页显示最终目录预览：输入 `E:\` 会补全为 `E:\DesignExtractor Personal`；输入 `D:\Applications\` 表示父目录并追加产品文件夹；手输完整自定义目录（不以反斜杠结尾）保持原意。浏览选择磁盘或上级目录时自动追加产品文件夹，已选择产品目录则不重复追加（大小写不敏感）；取消浏览保留输入。“恢复默认目录”使用当前范围。安装目录必须是专用空目录或本应用原安装目录，不支持磁盘根目录作为最终位置、相对路径、网络路径及不存在的盘符。
+
+已有安装请选择相同范围升级。跨范围覆盖会提示并停止，不会静默卸载旧版；如需转换范围，请先冷备份个人数据，再卸载原程序并重新安装。所有用户安装只共享程序文件，每个账户仍使用自己的 `%APPDATA%/DesignExtractorPersonal/personal` 数据。
+
+卸载只删除程序及所属范围的快捷方式，保留个人数据。本版采用安全保留方案，不提供自动删除个人数据的复选框，也拒绝 `--delete-app-data` 参数。安装使用说明与 MIT、第三方开源许可分开；许可清单位于安装目录 `resources/licenses`，发布前需审阅版权归属及说明文本。
 
 ## 服务器版保持原启动方式
 
@@ -42,10 +48,17 @@ npm run desktop:dev
 npm run desktop:dir
 npm run desktop:dist
 npm run test:desktop:package
-npm run test:desktop:nsis -- -LiveGaoding
+npm run test:desktop:installer
+npm run test:desktop:installer:native
+# 仅在可恢复虚拟机或专用测试账户，以下会真实安装/升级/卸载：
+npm run test:desktop:nsis -- -DisposableEnvironment -LiveGaoding
+# 在专用管理员测试终端及无旧安装的测试账户中：
+npm run test:desktop:nsis -- -DisposableEnvironment -AllUsers
 ```
 
-最后一条会实际按用户安装到 `.desktop-build/NSIS 中文 安装 ...`，运行安装后的程序，测试同版本覆盖安装、卸载和用户数据保留。测试仅创建并清理自己的 SQLite 夹具记录，不访问 MySQL；联网稿定测试依赖分享链接仍公开可访问。不要在正在进行提取任务时运行安装/卸载测试。
+`test:desktop:installer:native` 编译生产使用的相同 NSIS 路径/范围函数，只写隔离报告，不安装、不提权、不写登记。`test:desktop:package` 仅在构建目录副本加入测试启动器并关闭该副本的 ASAR 完整性校验，以隔离 appData；发布包保持原样，该冒烟不代替原包安装验收。
+
+`test:desktop:nsis` 会实际安装到 `.desktop-build/NSIS 旧版/新版 中文 Path ...`，运行安装后的程序，测试 1.0.0 到当前版本、目录变更、范围冲突、同版本覆盖、快捷方式、卸载及用户数据保留。必须显式指定 `-DisposableEnvironment`，否则启动前停止；不要在日常账户运行。全用户模式测试新装与覆盖，不声称旧版支持全用户安装。测试遇到已有登记的安装会停止；只创建并清理自己的 SQLite 夹具和上传标记，不访问 MySQL。保留的 1.0.0 EXE 是跨版本测试必需文件。联网稿定测试依赖分享链接仍公开可访问。不要在提取任务运行时测试安装/卸载。自动化使用 `/S`，另需验证真实向导界面及 UAC 同意/拒绝。
 
 `test:mysql` 使用现有回归脚本及隔离数据库 mock；`test:mysql:live` 读取服务器配置，只执行 SELECT/SHOW，不运行迁移或修改历史。真实服务器 `npm start` 仍会按旧逻辑检查所需列。
 
