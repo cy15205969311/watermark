@@ -189,6 +189,7 @@ test("shouldAttemptDynamicAfterStatic keeps probing share links with single stat
         imageUrl: "https://gdesign-dam-hw.dancf.com/work/preview/page-1.jpeg",
         source: "html-preview-bundle",
         pageCount: 4,
+        isComplete: true,
         score: 1900,
       },
       "share"

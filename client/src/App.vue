@@ -78,11 +78,11 @@
           <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon class="error-alert" />
 
           <div class="button-group">
-            <el-button type="success" size="large" :loading="loading" @click="handleParse" class="parse-btn">
-              <el-icon>
-                <Search />
-              </el-icon>
-              {{ loading ? '智能解析中...' : '解析链接' }}
+            <el-button type="success" size="large" native-type="button" :disabled="loading"
+              :aria-busy="loading" @click="handleParse" class="parse-btn">
+              <span v-if="loading" class="extract-loading-spinner" aria-hidden="true"></span>
+              <el-icon v-else aria-hidden="true"><Search /></el-icon>
+              <span>{{ loading ? '解析中，请稍候…' : '解析链接' }}</span>
             </el-button>
 
             <el-button type="primary" size="large" class="upload-btn" @click="openUploadDialog">
@@ -341,20 +341,21 @@ function normalizePages(pages, fallbackUrls = []) {
   const normalizedPages = []
   const seen = new Set()
 
-  const addPage = (imageUrl, pageNumber) => {
+  const addPage = (imageUrl, pageNumber, details = {}) => {
     if (typeof imageUrl !== 'string') return
     const normalizedUrl = imageUrl.trim()
     if (!normalizedUrl || isBlockedPreviewAssetUrl(normalizedUrl) || seen.has(normalizedUrl)) return
 
     seen.add(normalizedUrl)
     normalizedPages.push({
+      ...details,
       page: Number(pageNumber) || normalizedPages.length + 1,
       imageUrl: normalizedUrl
     })
   }
 
   ;(pages || []).forEach((page, index) => {
-    addPage(page?.imageUrl, page?.page || index + 1)
+    addPage(page?.imageUrl, page?.page || index + 1, page)
   })
 
   if (!normalizedPages.length) {
@@ -513,11 +514,14 @@ async function handleDownloadEvent({ record, format }) {
 }
 
 const handleParse = async () => {
+  // Claim the shared state synchronously, before any request or Vue DOM update.
+  if (loading.value) return
   if (!inputUrl.value.trim()) {
     store.commit('SET_ERROR', '请输入有效的链接')
     return
   }
 
+  store.commit('SET_LOADING', true)
   try {
     store.commit('SET_ERROR', null)
     let originalUrl = inputUrl.value.trim()
@@ -534,7 +538,8 @@ const handleParse = async () => {
     // 最后尝试使用 URL 构造器判定是否为有效 URL
     try {
       /* eslint-disable no-new */
-      new URL(originalUrl)
+      const parsedUrl = new URL(originalUrl)
+      if (!['http:', 'https:'].includes(parsedUrl.protocol) || !parsedUrl.hostname) throw new Error('invalid_url')
     } catch (err) {
       store.commit('SET_ERROR', '请输入有效的链接（请包含 https:// 或 www.）')
       return
@@ -615,11 +620,14 @@ const handleParse = async () => {
     let extractedStatus = 'success'
     let extractedDetails = {}
 
+    const extractController = new AbortController()
+    const extractTimeout = setTimeout(() => extractController.abort(), 120000)
     try {
       const response = await fetch(buildApiUrl('/extract-image'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: originalUrl, platform })
+        body: JSON.stringify({ url: originalUrl, platform }),
+        signal: extractController.signal
       })
 
       const data = await response.json()
@@ -672,12 +680,12 @@ const handleParse = async () => {
           const resourceNotice = resourceStatusText(data)
           if (resourceNotice) noticeMessage = [noticeMessage, resourceNotice].filter(Boolean).join('；')
           if (backendStatus !== 'success' || data.warningText) {
-            noticeMessage = data.warningText || data.message || null
+            noticeMessage = data.warningText || data.message || noticeMessage
           }
 
           console.log('✅ 后端验证成功:', { resourceRole: data.resourceRole, downloadStatus: data.downloadStatus })
         } else {
-          if (platform === '818ps') throw new Error(data.message || '未取得可用设计页预览')
+          if (['818ps', 'Gaoding'].includes(platform)) throw new Error(data.message || '未取得可用设计页预览')
           const errorMsg = data.message || '无法获取真实图片'
           console.warn('⚠️ 后端响应未返回有效图片:', errorMsg)
 
@@ -691,7 +699,7 @@ const handleParse = async () => {
       } else {
         // 后端返回错误，使用占位图作为降级方案
         const errorMsg = data.message || '无法获取真实图片'
-        if (platform === '818ps') throw new Error(errorMsg)
+        if (['818ps', 'Gaoding'].includes(platform)) throw new Error(errorMsg)
         console.warn('⚠️ 后端响应错误 (HTTP ' + response.status + '):', errorMsg)
 
         // 根据平台使用不同的占位图策略
@@ -705,8 +713,9 @@ const handleParse = async () => {
         }
       }
     } catch (error) {
+      if (extractController.signal.aborted) error = new Error('解析请求超时，请重试')
       console.error('❌ 后端API调用失败:', error.message)
-      if (platform === '818ps') throw error
+      if (['818ps', 'Gaoding'].includes(platform)) throw error
 
       // 使用降级方案
       if (platform === '818ps' && thumbnailUrl.includes('img.818ps.com')) {
@@ -717,6 +726,8 @@ const handleParse = async () => {
         thumbnailUrl = `https://picsum.photos/seed/${platform}-${Date.now()}/400/300`
         warningMessage = '⚠️ 网络连接失败，已使用占位图'
       }
+    } finally {
+      clearTimeout(extractTimeout)
     }
 
     // 显示警告信息（如果有）
@@ -763,6 +774,8 @@ const handleParse = async () => {
   } catch (err) {
     console.error('❌ 解析失败:', err)
     store.commit('SET_ERROR', err.message || '解析失败，请重试')
+  } finally {
+    store.commit('SET_LOADING', false)
   }
 }
 
@@ -1088,6 +1101,43 @@ onBeforeUnmount(() => {
   width: 100%;
   border-radius: 12px;
   font-weight: 500;
+}
+
+.parse-btn {
+  min-width: 0;
+}
+
+.parse-btn :deep(> span) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.parse-btn.is-disabled,
+.parse-btn.is-disabled:hover {
+  background-color: #529b2e;
+  border-color: #529b2e;
+  color: #fff;
+  cursor: wait;
+}
+
+.extract-loading-spinner {
+  width: 15px;
+  height: 15px;
+  border: 2px solid rgba(255, 255, 255, 0.45);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: extract-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes extract-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .extract-loading-spinner { animation: none; }
 }
 
 /* 在较宽屏时将主要按钮水平排列 */

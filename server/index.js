@@ -899,9 +899,9 @@ app.post("/api/extract-image", async (req, res) => {
       await extractImage(url, resolvedPlatform, { requestId })
     );
 
-    console.log(
-      `[${requestId}] ✅ 图片提取成功，来源: ${result.source || "unknown"}`
-    );
+    const extractionLabel = result.success === false ? "未取得图片资源" :
+      ["partial", "unknown"].includes(result.completenessStatus) ? "已取得预览" : "图片提取成功";
+    console.log(`[${requestId}] ${extractionLabel}，来源: ${result.source || "unknown"}，页数: ${result.pageCount}，完整性: ${result.completenessStatus || "unspecified"}`);
 
     // 确保向客户端返回统一结构，并包含 textLayers（如果存在）
     const payload = {

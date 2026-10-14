@@ -1457,20 +1457,25 @@ async function extractChuangkitImageEnhanced(url) {
   }
 }
 
-async function extractGaodingImage(url) {
+async function extractGaodingImage(url, options = {}) {
   try {
-    console.log("Starting Gaoding extraction:", url);
+    console.log("Starting Gaoding extraction:", redact(url));
 
     const result = await extractGaoding(url, {
       timeout: 15000,
       headless: true,
+      ...options,
     });
 
-    if (result && result.success && result.imageUrl) {
+    if (result && ((result.success && result.imageUrl) || result.status === "preview_only")) {
       console.log("Gaoding extractor hit:", {
         source: result.source,
-        pageCount: result.pageCount || 1,
+        pageCount: result.pageCount,
         linkType: result.linkType,
+        completenessStatus: result.completenessStatus,
+        expectedPageCount: result.expectedPageCount,
+        shareId: result.metadata?.shareId,
+        selectionReason: result.selectionReason,
       });
       return result;
     }
@@ -1525,13 +1530,15 @@ async function extractImage(url, platform, options = {}) {
   const shouldPreferLocalChuangkit = isChuangkitTarget(url, platform);
   const shouldUseHuabanLocalOnly = isHuabanTarget(url, platform);
   const shouldPreferLocal818ps = /818ps|tuguaishou/i.test(platform || "") || /(?:818ps|tuguaishou)\.com/i.test(url);
+  // A gateway image has no share/page evidence; Gaoding must use its scoped extractor.
+  const shouldUseGaodingLocalOnly = /gaoding|稿定/i.test(platform || "") || /(?:gaoding\.com|gaoding\.cn)/i.test(url);
   let thirdPartyFallback = null;
 
   try {
     // ========== 阶段 1: 优先使用第三方 API 网关（命中率 80%+）==========
     console.log("\n📡 阶段 1: 尝试第三方 API 网关...");
-    if (shouldUseHuabanLocalOnly) {
-      console.log("\nℹ️ 花瓣使用官方公开接口，跳过第三方 API 网关...");
+    if (shouldUseHuabanLocalOnly || shouldUseGaodingLocalOnly) {
+      console.log("\nℹ️ 当前平台使用关联目标的本地提取，跳过第三方 API 网关...");
     } else {
       try {
         const thirdPartyResult = await extractViaThirdPartyAPIWithCache(
@@ -1604,7 +1611,7 @@ async function extractImage(url, platform, options = {}) {
         url.includes("gaoding.com") ||
         url.includes("gaoding.cn")
       ) {
-        result = await extractGaodingImage(url);
+        result = await extractGaodingImage(url, options);
       } else if (platform === "Canva" && url.includes("canva")) {
         result = await extractCanvaImage(url);
       } else if (isHuabanTarget(url, platform)) {

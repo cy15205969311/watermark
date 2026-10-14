@@ -11,11 +11,8 @@ if (typeof global.Blob === "undefined") {
 
 const axios = require("axios");
 const cheerio = require("cheerio");
-const puppeteer = require("puppeteer-extra");
-const StealthPlugin = require("puppeteer-extra-plugin-stealth");
-const { withPuppeteerExecutablePath } = require("../utils/puppeteer-launch");
-
-puppeteer.use(StealthPlugin());
+const { getDefaultPool } = require("../services/browser-pool");
+const { redact } = require("./818ps-pages");
 
 const IMAGE_URL_PATTERN =
   /(?<url>(?:https?:)?\/\/[^\s"'<>\\]+?\.(?:png|jpe?g|webp|gif)(?:\?[^\s"'<>\\]*)?)/i;
@@ -136,8 +133,10 @@ function normalizeGaodingInputUrl(inputUrl) {
     const parsed = new URL(trimmed);
     const hostname = String(parsed.hostname || "").toLowerCase();
 
-    if (hostname.includes("gaoding.com") || hostname.includes("gaoding.cn")) {
-      parsed.hash = "";
+    if (/(^|\.)(gaoding\.com|gaoding\.cn)$/.test(hostname)) {
+      let fragment = parsed.hash.slice(1);
+      try { fragment = decodeURIComponent(fragment); } catch {}
+      if (/我分享了|点击链接查看|点击.*查看吧/.test(fragment)) parsed.hash = "";
     }
 
     return parsed.toString();
@@ -167,6 +166,7 @@ function classifyLink(url) {
       "id",
     ]);
 
+    if (path.includes("share") || path.includes("invite")) return "share";
     if (Array.from(designQueryKeys).some((key) => queryKeys.has(key))) {
       if (path.includes("/editor/design")) {
         return "editor";
@@ -629,135 +629,14 @@ function extractPreviewBundleFromHtml(htmlContent) {
 }
 
 function extractPagePreviewUrlsFromDesignData(data) {
-  const pages = Array.isArray(data && data.pages) ? data.pages : [];
-  const pageUrls = [];
-  const addBestUrlFromPageLikeNode = (page, pageIndex, pathLabel) => {
-    const candidates = [];
-    const addCandidate = (rawUrl, hint, bonus = 0) => {
-      const normalized = normalizeCandidateUrl(rawUrl);
-      if (!normalized) {
-        return;
-      }
-
-      candidates.push({
-        url: normalized,
-        score:
-          scoreCandidate(
-            normalized,
-            `design_json.${pathLabel}[${pageIndex}].${hint}`,
-            "detail"
-          ) + bonus,
-      });
-    };
-
-    addCandidate(page && page.preview_info && page.preview_info.url, "preview_info.url", 420);
-    addCandidate(page && page.previewInfo && page.previewInfo.url, "previewInfo.url", 420);
-    addCandidate(
-      page && page.source_preview_info && page.source_preview_info.url,
-      "source_preview_info.url",
-      460
-    );
-    addCandidate(
-      page && page.sourcePreviewInfo && page.sourcePreviewInfo.url,
-      "sourcePreviewInfo.url",
-      460
-    );
-    addCandidate(page && page.thumbnail && page.thumbnail.url, "thumbnail.url", 260);
-    addCandidate(page && page.cover && page.cover.url, "cover.url", 220);
-    addCandidate(page && page.poster && page.poster.url, "poster.url", 220);
-
-    const elements = Array.isArray(page && page.elements) ? page.elements : [];
-    elements.forEach((element, elementIndex) => {
-      const hintPrefix = `elements[${elementIndex}]`;
-      const elementType = String(element && element.type || "").toLowerCase();
-
-      if (elementType === "layout") {
-        addCandidate(
-          element && element.thumbnail && element.thumbnail.url,
-          `${hintPrefix}.thumbnail.url`,
-          360
-        );
-        addCandidate(
-          element &&
-            element.background &&
-            element.background.image &&
-            element.background.image.url,
-          `${hintPrefix}.background.image.url`,
-          180
-        );
-      }
-
-      addCandidate(element && element.preview_info && element.preview_info.url, `${hintPrefix}.preview_info.url`, 260);
-      addCandidate(element && element.previewInfo && element.previewInfo.url, `${hintPrefix}.previewInfo.url`, 260);
-      addCandidate(element && element.thumbnail && element.thumbnail.url, `${hintPrefix}.thumbnail.url`, 220);
-      addCandidate(element && element.cover && element.cover.url, `${hintPrefix}.cover.url`, 180);
-    });
-
-    const bestCandidate = candidates.sort((left, right) => right.score - left.score)[0];
-    if (bestCandidate && bestCandidate.url) {
-      pageUrls.push(bestCandidate.url);
-    }
-  };
-
-  pages.forEach((page, pageIndex) => {
-    addBestUrlFromPageLikeNode(page, pageIndex, "pages");
-  });
-
-  const layouts = Array.isArray(data && data.layouts) ? data.layouts : [];
-  layouts.forEach((layout, layoutIndex) => {
-    addBestUrlFromPageLikeNode(layout, layoutIndex, "layouts");
-
-    const normalizedLayoutImageUrl = normalizeCandidateUrl(layout && layout.imageUrl);
-    if (normalizedLayoutImageUrl) {
-      pageUrls.push(normalizedLayoutImageUrl);
-    }
-  });
-
-  return dedupeUrls(pageUrls);
-}
-
-async function fetchDesignJsonPageUrls(designInfoUrl, options = {}) {
-  if (!designInfoUrl) {
-    return {
-      pageUrls: [],
-      pageLikeCount: 0,
-    };
+  const state = createExtractionState('https://www.gaoding.com/detail');
+  collectDesignData(data, state, { trusted: true, source: 'design-json-pages', path: 'design_json' });
+  const groups = new Map();
+  for (const candidate of state.candidates) {
+    const old = groups.get(candidate.pageKey);
+    if (!old || candidate.score > old.score) groups.set(candidate.pageKey, candidate);
   }
-
-  try {
-    const response = await axios.get(designInfoUrl, {
-      headers: {
-        ...GAODING_HEADERS,
-        Accept: "application/json,text/plain,*/*",
-      },
-      timeout: Number(options.timeout) || STATIC_TIMEOUT,
-      maxRedirects: 5,
-      validateStatus: () => true,
-    });
-
-    if (response.status !== 200) {
-      return {
-        pageUrls: [],
-        pageLikeCount: 0,
-      };
-    }
-
-    const data =
-      typeof response.data === "string" ? JSON.parse(response.data) : response.data;
-
-    return {
-      pageUrls: extractPagePreviewUrlsFromDesignData(data),
-      pageLikeCount: Math.max(
-        Array.isArray(data && data.pages) ? data.pages.length : 0,
-        Array.isArray(data && data.layouts) ? data.layouts.length : 0
-      ),
-    };
-  } catch {
-    return {
-      pageUrls: [],
-      pageLikeCount: 0,
-    };
-  }
+  return [...groups.values()].map(candidate => candidate.url);
 }
 
 function candidateGroupKey(hint) {
@@ -1040,7 +919,7 @@ async function validateGaodingImageUrl(imageUrl) {
 }
 
 async function inspectGaodingImageAsset(imageUrl) {
-  const normalized = normalizeCandidateUrl(imageUrl);
+  const normalized = safeImageUrl(imageUrl);
   if (!normalized) {
     return null;
   }
@@ -1055,6 +934,7 @@ async function inspectGaodingImageAsset(imageUrl) {
       timeout: VALIDATE_TIMEOUT,
       maxRedirects: 5,
       responseType: "arraybuffer",
+      maxContentLength: 8 * 1024 * 1024,
       headers: {
         ...requestHeaders,
         Range: "bytes=0-65535",
@@ -1085,7 +965,7 @@ async function inspectGaodingImageAsset(imageUrl) {
       url: normalized,
       status: response.status,
       contentType,
-      bytes:
+      bytes: Number(String(response.headers?.['content-range'] || '').split('/')[1]) ||
         Number(
           (response.headers && response.headers["content-length"]) || 0
         ) || Buffer.byteLength(Buffer.from(response.data || [])),
@@ -1291,568 +1171,423 @@ function getResultPageCount(result) {
   ]).length;
 }
 
-function shouldAttemptDynamicAfterStatic(staticResult, linkType) {
-  if (!staticResult || !staticResult.success || !staticResult.imageUrl) {
-    return true;
-  }
-
-  if (getResultPageCount(staticResult) > 1) {
-    return false;
-  }
-
-  if (!["share", "detail", "editor", "creation"].includes(linkType)) {
-    return false;
-  }
-
-  const source = String(staticResult.source || "").toLowerCase();
-  return (
-    !source ||
-    source.includes("candidate") ||
-    source.includes("meta") ||
-    source.includes("cover") ||
-    source.includes("preview") ||
-    Number(staticResult.score || 0) < 1600
-  );
+function shareIdFromUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.pathname.match(/\/(?:dam\/)?share\/([^/]+)/i)?.[1] ||
+      parsed.searchParams.get('share_id') || parsed.searchParams.get('shareId') || null;
+  } catch { return null; }
 }
 
-function selectPreferredResult(primaryResult, secondaryResult, linkType) {
-  if (!primaryResult) {
-    return secondaryResult || null;
+function createExtractionState(url, options = {}) {
+  return { url, resolvedUrl: url, shareId: shareIdFromUrl(url), designIds: new Set(),
+    candidates: [], evidence: [], designRefs: new Map(), fetchedRefs: new Set(),
+    validationCache: new Map(), diagnostics: [], fields: new Set(), options,
+    deadline: Date.now() + (Number(options.totalTimeout) || 60000), designDimensions: new Map() };
+}
+
+function diagnose(state, stage, details) {
+  const entry = { stage, ...details };
+  state.diagnostics.push(entry);
+  if (state.options.log !== false) console.log('Gaoding extraction:', redact(JSON.stringify(entry)));
+}
+
+function safeImageUrl(raw, base) {
+  if (raw && typeof raw === 'object') raw = raw.url;
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  try {
+    const url = new URL(decodeHtmlText(raw).replace(/\\\//g, '/'), base);
+    return /^https?:$/.test(url.protocol) ? url.href : null;
+  } catch { return null; }
+}
+
+// Parse literal JSON only. Balanced scanning handles assignments/cache.push without eval.
+function embeddedJson(text) {
+  const decoded = decodeHtmlText(text);
+  try { return [JSON.parse(decoded)]; } catch {}
+  const objects = [];
+  for (let start = 0; start < decoded.length && objects.length < 100; start++) {
+    if (!['{', '['].includes(decoded[start])) continue;
+    let depth = 0, quoted = false, escaped = false, end = start;
+    for (; end < decoded.length; end++) {
+      const char = decoded[end];
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === '"') quoted = false;
+      } else if (char === '"') quoted = true;
+      else if (char === '{' || char === '[') depth++;
+      else if (char === '}' || char === ']') { if (--depth === 0) break; }
+    }
+    if (depth !== 0) continue;
+    try { objects.push(JSON.parse(decoded.slice(start, end + 1))); start = end; } catch {}
   }
-  if (!secondaryResult) {
-    return primaryResult;
-  }
+  return objects;
+}
 
-  const scoreResult = (result) => {
-    const pageCount = getResultPageCount(result);
-    const source = String(result.source || "").toLowerCase();
-    let score = Number(result.score || 0);
+const PREVIEW_FIELDS = [
+  ['source_preview_info', 1000, 'page_preview'], ['sourcePreviewInfo', 1000, 'page_preview'],
+  ['preview_info', 900, 'page_preview'], ['previewInfo', 900, 'page_preview'],
+  ['previewUrl', 900, 'page_preview'], ['preview_url', 900, 'page_preview'],
+  ['imageUrl', 850, 'page_preview'], ['image', 850, 'page_preview'],
+  ['thumbnail', 400, 'page_thumbnail'], ['thumbnailUrl', 400, 'page_thumbnail'],
+  ['cover', 350, 'cover'], ['poster', 350, 'cover'],
+];
+const EXCLUDED_BRANCH = /^(?:elements|background|materials?|resources?|recommend.*|related.*|banners?|menus?|header|footer|sidebar|imports|scopes|avatar|icons?)$/i;
 
-    if (pageCount > 1) {
-      score += 10000 + pageCount * 120;
+function collectDesignData(data, state, context = {}) {
+  const walk = (node, ctx, depth = 0) => {
+    if (depth > 30 || !node || typeof node !== 'object') return;
+    if (Array.isArray(node)) { node.forEach((item, i) => walk(item, { ...ctx, path: `${ctx.path}[${i}]` }, depth + 1)); return; }
+    const explicitShare = node.shareCode || node.share_code || node.shareId || node.share_id || node.metaShareCode;
+    if (explicitShare && state.shareId && String(explicitShare) !== state.shareId) return;
+    let trusted = ctx.trusted || Boolean(explicitShare && String(explicitShare) === state.shareId);
+    const share = node.metaShareInfo;
+    if (share && String(share.shareCode || '') === state.shareId) {
+      trusted = true;
+      for (const id of share.fileIds || []) state.designIds.add(String(id));
+      if (share.enabled === false || share.isOpen === false) state.diagnostics.push({ stage: 'access', reason: 'share_unavailable' });
     }
-
-    if (source.includes("multi-page") || source.includes("preview-bundle")) {
-      score += 900;
+    const id = node.designId || node.design_id || node.fileId || node.file_id ||
+      (node.id && (node.preview_info || node.source_preview_info || node.design_info || node.pages || node.layouts) ? node.id : null) ||
+      (/(?:metaFileDetail|file_detail|design|work|template)(?:$|\[)/i.test(ctx.path || '') ? node.id : null);
+    if (id && state.designIds.size && !state.designIds.has(String(id))) return;
+    if (id && trusted) state.designIds.add(String(id));
+    trusted = trusted || Boolean(id && state.designIds.has(String(id)));
+    const current = { ...ctx, trusted, designId: id ? String(id) : ctx.designId };
+    if (trusted) {
+      const previewSize = node.preview_info || node.previewInfo;
+      if (current.designId && previewSize?.width && previewSize?.height) state.designDimensions.set(current.designId, { width: previewSize.width, height: previewSize.height });
+      for (const field of ['source_preview_info', 'preview_info', 'extends_previews', 'design_info', 'pages', 'layouts']) {
+        if (node[field] !== undefined) state.fields.add(field);
+      }
+      const count = Number(node.pageCount ?? node.page_count ?? node.totalPages ?? node.total_pages);
+      if (Number.isInteger(count) && count > 0 && count <= 1000) {
+        state.evidence.push({ count, source: `${ctx.path}.pageCount`, confidence: 'verified', numbered: false });
+      }
+      const ref = safeImageUrl(node.design_info?.url || node.designInfo?.url, state.resolvedUrl);
+      if (ref && state.designRefs.size < 4) state.designRefs.set(ref, current);
     }
-
-    if (source.includes("dynamic")) {
-      score += ["share", "detail", "editor", "creation"].includes(linkType)
-        ? 220
-        : 60;
+    const pages = Array.isArray(node.pages) && node.pages.length ? node.pages : null;
+    const layouts = Array.isArray(node.layouts) && node.layouts.length ? node.layouts : null;
+    const collection = pages || layouts; // Alternate representations of the same design.
+    if (trusted && collection) {
+      const label = pages ? 'pages' : 'layouts';
+      const explicitCount = Number(node.pageCount ?? node.page_count ?? node.totalPages ?? node.total_pages);
+      const declaredNumbers = collection.map(p => Number(p?.pageNumber ?? p?.page_number ?? p?.page));
+      const numbered = declaredNumbers.some(n => Number.isInteger(n) && n > 0);
+      state.evidence.push({ count: Math.max(collection.length, explicitCount || 0), source: `${ctx.path}.${label}.length`, confidence: 'verified', numbered: !numbered && !(explicitCount > collection.length) });
+      collection.forEach((page, index) => {
+        if (!page || typeof page !== 'object') return;
+        const pageId = page.pageId ?? page.page_id ?? page.id ?? page.uuid ?? null;
+        const explicitNumber = Number(page.pageNumber ?? page.page_number ?? page.page);
+        const pageNumber = Number.isInteger(explicitNumber) && explicitNumber > 0 ? explicitNumber :
+          (!numbered && !(explicitCount > collection.length) ? index + 1 : null);
+        const pageContext = { ...current, path: `${ctx.path}.${label}[${index}]`,
+          pageId: pageId === null ? null : String(pageId), pageNumber,
+          pageKey: pageId !== null ? `id:${pageId}` : pageNumber ? `page:${pageNumber}` : `${ctx.path}.${label}[${index}]` };
+        addPreviewNode(page, state, pageContext);
+        if (pages && layouts) {
+          const peer = pageId !== null ? layouts.find(layout => String(layout?.pageId ?? layout?.page_id ?? layout?.id ?? layout?.uuid ?? '') === String(pageId)) :
+            (pages.length === layouts.length ? layouts[index] : null);
+          if (peer) addPreviewNode(peer, state, { ...pageContext, path: `${ctx.path}.layouts[${layouts.indexOf(peer)}]` });
+        }
+      });
+    } else if (trusted) {
+      addPreviewNode(node, state, { ...current, pageKey: 'primary', pageId: null, pageNumber: null });
+      // Only explicit page identity makes extends_previews separate pages.
+      for (const [index, preview] of (Array.isArray(node.extends_previews) ? node.extends_previews : []).entries()) {
+        const pageId = preview.pageId ?? preview.page_id;
+        const number = Number(preview.pageNumber ?? preview.page_number ?? preview.page);
+        const pageNumber = Number.isInteger(number) && number > 0 ? number : null;
+        addPreviewNode({ preview_info: preview }, state, { ...current, path: `${ctx.path}.extends_previews[${index}]`,
+          pageId: pageId == null ? null : String(pageId), pageNumber,
+          pageKey: pageId != null ? `id:${pageId}` : pageNumber ? `page:${pageNumber}` : 'primary' });
+      }
     }
-
-    if (source.includes("design-json")) {
-      score += 320;
+    for (const [key, value] of Object.entries(node)) {
+      if (EXCLUDED_BRANCH.test(key) || ['pages', 'layouts', 'extends_previews', 'design_info', 'designInfo'].includes(key) || PREVIEW_FIELDS.some(([field]) => field === key)) continue;
+      walk(value, { ...current, path: `${ctx.path}.${key}` }, depth + 1);
     }
-
-    if (source.includes("candidate") || source === "meta") {
-      score -= 120;
-    }
-
-    return score;
   };
-
-  return scoreResult(secondaryResult) > scoreResult(primaryResult)
-    ? secondaryResult
-    : primaryResult;
+  walk(data, { source: 'html-preview', path: 'root', ...context });
 }
 
-function looksLikeAntiBotPage(htmlContent) {
-  const lowered = String(htmlContent || "").toLowerCase();
-  const antiBotTexts = [
-    "\u0034\u0030\u0035\u5f02\u5e38\u8bbf\u95ee",
-    "\u8bf7\u6c42\u6709\u5f02\u5e38\u884c\u4e3a",
-    "\u8bbf\u95ee\u88ab\u963b\u6b62\u4e86",
-  ];
-
-  return (
-    antiBotTexts.some((text) => String(htmlContent || "").includes(text)) ||
-    lowered.includes("security threat")
-  );
+function addPreviewNode(node, state, context) {
+  const addFields = (value, path, bonus = 0) => {
+    for (const [field, score, role] of PREVIEW_FIELDS) {
+      const preview = value[field];
+      const url = safeImageUrl(preview, state.resolvedUrl);
+      if (!url) continue;
+      state.candidates.push({ url, ...context, resourceRole: role, score: score + bonus,
+        width: Number(preview?.width || value.width) || null, height: Number(preview?.height || value.height) || null,
+        shareId: state.shareId, evidencePath: `${path}.${field}`, selectionReason: 'target_structured_preview', validationStatus: 'pending' });
+    }
+  };
+  addFields(node, context.path);
+  // A single layout wrapper may describe the whole page. Other elements never do.
+  const elements = Array.isArray(node.elements) ? node.elements : [];
+  if (elements.length === 1 && elements[0]?.type === 'layout') addFields(elements[0], `${context.path}.elements[0]`, -50);
 }
 
-async function analyzeHtmlContent(htmlContent, originalUrl, linkType, stage) {
-  if (!htmlContent || looksLikeAntiBotPage(htmlContent)) {
-    return null;
-  }
-
-  const $ = cheerio.load(htmlContent);
-  const metaEntries = extractMetaCandidates($);
-  const domEntries = extractDomCandidates($);
-  const jsonEntries = extractJsonCandidates($);
-  const textEntries = extractContextualUrlsFromText(htmlContent);
-  const previewBundleEntries = extractPreviewBundleFromHtml(htmlContent);
-
-  if (previewBundleEntries.length) {
-    const validUrls = await validatePrimaryUrlsInOrder(
-      previewBundleEntries.map(([imageUrl]) => imageUrl)
-    );
-    if (validUrls.length >= 2) {
-      return buildResult(
-        validUrls,
-        originalUrl,
-        stage === "dynamic"
-          ? "dynamic-html-preview-bundle"
-          : "html-preview-bundle",
-        stage === "dynamic"
-          ? "browser_html_preview_bundle"
-          : "static_html_preview_bundle",
-        linkType,
-        stage === "dynamic" ? 1800 : 1900
-      );
+function collectHtmlData(html, state, source) {
+  const $ = cheerio.load(html || '');
+  $('[contextdata]').each((_, element) => {
+    for (const data of embeddedJson($(element).attr('contextdata') || '')) {
+      collectDesignData(data, state, { source, path: 'html.contextdata', trusted: !state.shareId });
     }
-
-    if (validUrls.length === 1) {
-      return buildResult(
-        validUrls,
-        originalUrl,
-        stage === "dynamic" ? "dynamic-html-preview" : "html-preview",
-        stage === "dynamic"
-          ? "browser_html_preview_single"
-          : "static_html_preview_single",
-        linkType,
-        stage === "dynamic" ? 1760 : 1860
-      );
+  });
+  $('script:not([src])').each((_, element) => {
+    if (['importmap', 'module'].includes($(element).attr('type'))) return;
+    for (const data of embeddedJson($(element).html() || '')) {
+      // SSR data from the requested document is evidence, unlike arbitrary network bodies.
+      collectDesignData(data, state, { source, path: 'html.script', trusted: true });
     }
+  });
+  // Older SSR serializes business fields in HTML attributes rather than JSON scripts.
+  if (!state.candidates.length && !state.designIds.size) {
+    const ref = extractDesignInfoUrlFromHtml(html);
+    if (ref) state.designRefs.set(ref, { trusted: true, source, path: 'html.design_info' });
   }
-
-  const multiPageEntries = selectBestMultiPageGroup(jsonEntries);
-  if (multiPageEntries.length) {
-    const validUrls = await validatePrimaryUrlsInOrder(
-      multiPageEntries.map(([imageUrl]) => imageUrl)
-    );
-    if (validUrls.length >= 2) {
-      return buildResult(
-        validUrls,
-        originalUrl,
-        stage === "dynamic" ? "dynamic-multi-page" : "json-multi-page",
-        stage === "dynamic"
-          ? "browser_dynamic_group"
-          : "static_json_group",
-        linkType,
-        stage === "dynamic" ? 1700 : 1600
-      );
-    }
-  }
-
-  if (metaEntries.length) {
-    const metaUrl = await pickBestPrimarySingleCandidate(metaEntries, linkType, 4);
-    if (metaUrl) {
-      return buildResult(
-        [metaUrl],
-        originalUrl,
-        stage === "dynamic" ? "dynamic-meta" : "meta",
-        stage === "dynamic" ? "browser_meta" : "static_meta",
-        linkType,
-        stage === "dynamic" ? 1000 : 900
-      );
-    }
-  }
-
-  const bestUrl = await pickBestPrimarySingleCandidate(
-    metaEntries.concat(jsonEntries, domEntries, textEntries),
-    linkType
-  );
-  if (bestUrl) {
-    return buildResult(
-      [bestUrl],
-      originalUrl,
-      stage === "dynamic" ? "dynamic-candidate" : "static-candidate",
-      stage === "dynamic"
-        ? "browser_dynamic_candidate"
-        : "static_candidate_selection",
-      linkType,
-      stage === "dynamic" ? 1100 : 700
-    );
-  }
-
-  return null;
+  diagnose(state, source, { fields: [...state.fields], candidates: state.candidates.length, designRefs: state.designRefs.size, designIds: [...state.designIds] });
 }
 
-async function staticScraping(url, linkType, options = {}) {
+// These public endpoints and ordinary product/channel headers come from the
+// share viewer's shipped client. No login credentials or private endpoints.
+async function fetchPublicShareData(state) {
+  const parsed = new URL(state.url);
+  if (!state.shareId || !/^\/dam\/share\//.test(parsed.pathname) || !/(^|\.)(gaoding\.com|gaoding\.cn)$/.test(parsed.hostname)) return;
+  const headers = { ...GAODING_HEADERS, Accept: 'application/json', 'x-business-id': '13', 'x-channel-id': '32' };
+  const get = path => axios.get(new URL(path, parsed.origin).href, { headers,
+    timeout: Math.min(Number(state.options.timeout) || STATIC_TIMEOUT, Math.max(1, state.deadline - Date.now())),
+    maxContentLength: 4 * 1024 * 1024, maxRedirects: 5, validateStatus: () => true });
   try {
-    const response = await axios.get(url, {
-      headers: GAODING_HEADERS,
-      timeout: Number(options.timeout) || STATIC_TIMEOUT,
-      maxRedirects: 5,
-      validateStatus: () => true,
-    });
-
-    if (response.status !== 200) {
-      return null;
+    const response = await get(`/api/dam/shares/${encodeURIComponent(state.shareId)}/resource`);
+    const data = response.data?.data || response.data;
+    const config = data?.share_config_info;
+    if (response.status !== 200 || String(config?.share_code || '') !== state.shareId) {
+      diagnose(state, 'share_api', { status: response.status, reason: 'share_metadata_unavailable' }); return;
     }
-
-    const htmlContent =
-      typeof response.data === "string" ? response.data : String(response.data);
-    const htmlResult = await analyzeHtmlContent(
-      htmlContent,
-      url,
-      linkType,
-      "static"
-    );
-    if (getResultPageCount(htmlResult) > 1) {
-      return htmlResult;
+    if (config.is_open === false || config.is_open_password === true || (config.expire_at && config.expire_at < Date.now())) {
+      state.accessRestriction = config.is_open_password ? 'share_password_required' : 'share_closed_or_expired';
+      state.candidates = [];
+      diagnose(state, 'share_api', { reason: state.accessRestriction }); return;
     }
-
-    const designInfoUrl = extractDesignInfoUrlFromHtml(htmlContent);
-    const { pageUrls: designJsonPageUrls, pageLikeCount } =
-      await fetchDesignJsonPageUrls(designInfoUrl, options);
-    const designJsonResult =
-      designJsonPageUrls.length >= 2
-        ? buildResult(
-            designJsonPageUrls,
-            url,
-            "design-json-pages",
-            "static_design_json_pages",
-            linkType,
-            1500
-          )
-        : null;
-    const preferredStaticResult = selectPreferredResult(
-      htmlResult,
-      designJsonResult,
-      linkType
-    );
-
-    if (
-      preferredStaticResult ||
-      !htmlResult ||
-      !designInfoUrl ||
-      pageLikeCount !== 1
-    ) {
-      return preferredStaticResult;
+    const ids = Array.isArray(data.file_ids) ? data.file_ids.map(String) : [];
+    ids.forEach(id => state.designIds.add(id));
+    diagnose(state, 'share_api', { shareId: config.share_code, designIds: ids, shareScope: config.share_scope });
+    for (const id of ids.slice(0, 4)) {
+      if (Date.now() >= state.deadline) break;
+      const assetResponse = await get(`/api/dam/asset/${encodeURIComponent(id)}`);
+      const asset = assetResponse.data?.data || assetResponse.data;
+      if (assetResponse.status !== 200 || String(asset?.id || '') !== id) {
+        diagnose(state, 'share_asset', { designId: id, status: assetResponse.status, reason: 'target_asset_unavailable' }); continue;
+      }
+      collectDesignData(asset, state, { trusted: true, designId: id, source: 'share-api-preview', path: `share_api.asset[${id}]` });
+      diagnose(state, 'share_asset', { designId: id, fields: [...state.fields], hasPreviewUrl: Boolean(asset.preview_info?.url), hasDesignJson: Boolean(asset.design_info?.url),
+        previewWidth: asset.preview_info?.width, previewHeight: asset.preview_info?.height });
     }
+  } catch (error) { diagnose(state, 'share_api', { reason: error.code || error.name }); }
+}
 
-    const htmlPrimaryUrl = await validatePrimaryUrlsInOrder([
-      htmlResult.imageUrl,
-      htmlResult.thumbnailUrl,
-      ...(Array.isArray(htmlResult.imageUrls) ? htmlResult.imageUrls : []),
-    ]);
-
-    if (!htmlPrimaryUrl.length) {
-      return preferredStaticResult;
-    }
-
-    return buildResult(
-      [htmlPrimaryUrl[0]],
-      url,
-      "design-json-single-page",
-      "static_design_json_single_page",
-      linkType,
-      Math.max(Number(htmlResult.score || 0), 1680)
-    );
-  } catch {
-    return null;
+async function fetchDesignJsonPageUrls(state) {
+  if (state.accessRestriction) return;
+  for (const [url, context] of state.designRefs) {
+    if (state.fetchedRefs.has(url)) continue;
+    if (Date.now() >= state.deadline) break;
+    state.fetchedRefs.add(url);
+    try {
+      const response = await axios.get(url, { headers: { ...GAODING_HEADERS, Accept: 'application/json' },
+        timeout: Number(state.options.timeout) || STATIC_TIMEOUT, maxContentLength: 8 * 1024 * 1024, maxRedirects: 5, validateStatus: () => true });
+      if (response.status !== 200) { diagnose(state, 'design_json', { status: response.status, reason: 'design_json_unavailable' }); continue; }
+      const data = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
+      collectDesignData(data, state, { ...context, path: 'design_json', source: 'design-json-pages', trusted: true });
+      diagnose(state, 'design_json', { pages: data?.pages?.length || 0, layouts: data?.layouts?.length || 0, candidates: state.candidates.length });
+    } catch (error) { diagnose(state, 'design_json', { reason: error.code || error.name }); }
   }
 }
 
-async function dynamicScraping(url, linkType, options = {}) {
-  let browser = null;
-  let page = null;
+async function finalizeState(state, linkType) {
+  const byPage = new Map();
+  const expected = state.evidence.length ? Math.max(...state.evidence.map(e => e.count)) : null;
+  const unique = new Map();
+  for (const candidate of state.candidates) {
+    const key = `${candidate.designId || ''}|${candidate.pageKey}:${candidate.url}`;
+    if (!unique.has(key) || unique.get(key).score < candidate.score) unique.set(key, candidate);
+  }
+  const ordered = [...unique.values()].sort((a, b) => b.score - a.score || (b.width * b.height) - (a.width * a.height));
+  let validCount = 0;
+  for (const candidate of ordered.slice(0, 64)) {
+    if (Date.now() >= state.deadline && !state.validationCache.has(candidate.url)) break;
+    const key = `${candidate.designId || ''}|${candidate.pageKey}`;
+    // All versions in a page group are inspected so a larger peer can win.
+    if (!state.validationCache.has(candidate.url)) state.validationCache.set(candidate.url, inspectGaodingImageAsset(candidate.url));
+    const asset = await state.validationCache.get(candidate.url);
+    if (!asset?.width || !asset?.height) { candidate.validationStatus = 'invalid'; continue; }
+    if (candidate.width && candidate.height && Math.abs((asset.width / asset.height) / (candidate.width / candidate.height) - 1) > 0.08) {
+      candidate.validationStatus = 'aspect_mismatch'; continue;
+    }
+    validCount++;
+    const validated = { ...candidate, width: asset.width, height: asset.height, contentType: asset.contentType,
+      fileSize: asset.bytes, aspectRatio: asset.width / asset.height, validationStatus: 'valid' };
+    const old = byPage.get(key);
+    if (!old || candidate.score > old.score || (candidate.score === old.score && asset.width * asset.height > old.width * old.height)) byPage.set(key, validated);
+  }
+  // A document cover must never become an extra page beside its actual pages.
+  for (const key of [...byPage.keys()]) {
+    if (!key.endsWith('|primary')) continue;
+    const designPrefix = key.slice(0, -'primary'.length);
+    if ([...byPage.keys()].some(other => other !== key && other.startsWith(designPrefix))) byPage.delete(key);
+  }
+  let selected = [...byPage.values()].sort((a, b) => (a.pageNumber || Infinity) - (b.pageNumber || Infinity));
+  const seen = new Set();
+  selected = selected.filter(c => { if (seen.has(c.url)) return false; seen.add(c.url); return true; });
+  const count = selected.length;
+  const fullPreviews = selected.every(c => c.resourceRole === 'page_preview');
+  const complete = Boolean(count && expected === count && fullPreviews && state.designIds.size <= 1);
+  const completenessStatus = complete ? 'complete' : expected ? 'partial' : 'unknown';
+  const numbers = selected.map(c => c.pageNumber);
+  const canIdentifyMissing = expected && (state.evidence.some(e => e.numbered) || (numbers.length && numbers.every(n => n !== null)));
+  const missingPages = !complete && canIdentifyMissing ? Array.from({ length: expected }, (_, i) => i + 1).filter(n => !numbers.includes(n)) : [];
+  const pages = selected.map((c, index) => ({ page: c.pageNumber || index + 1, pageNumber: c.pageNumber, pageId: c.pageId,
+    imageUrl: c.url, source: c.source, resourceRole: c.resourceRole, shareId: state.shareId, designId: c.designId || null,
+    width: c.width, height: c.height, contentType: c.contentType, fileSize: c.fileSize, validationStatus: c.validationStatus,
+    evidencePath: c.evidencePath, selectionReason: c.selectionReason }));
+  const source = selected[0]?.source || null;
+  diagnose(state, 'selection', { rawCandidates: state.candidates.length, fullPreviewCandidates: state.candidates.filter(c => c.resourceRole === 'page_preview').length,
+    thumbnailCandidates: state.candidates.filter(c => c.resourceRole === 'page_thumbnail').length, validCandidates: validCount,
+    filtered: state.candidates.filter(c => ['invalid', 'aspect_mismatch'].includes(c.validationStatus)).map(c => ({ field: c.evidencePath, reason: c.validationStatus })),
+    source, pageCount: count, expectedPageCount: expected, completenessStatus });
+  return { success: count > 0, platform: 'Gaoding', imageUrl: selected[0]?.url || null, thumbnailUrl: selected[0]?.url || null,
+    imageUrls: selected.map(c => c.url), images: selected.map(c => c.url), pages, pageCount: count, isMultiPage: count > 1,
+    source, linkType, original_url: state.url, expectedPageCount: expected, collectedPageCount: count,
+    pageCountConfidence: expected ? 'verified' : 'unknown', completenessStatus, isComplete: complete ? true : expected ? false : null, missingPages,
+    resourceRole: fullPreviews && count ? 'page_preview' : count ? 'partial_preview' : 'unavailable',
+    selectionReason: count ? selected[0].selectionReason : 'no_verified_target_preview',
+    status: complete ? 'success' : count ? 'preview_image' : 'preview_only',
+    message: count ? undefined : state.accessRestriction === 'share_password_required' ? '该分享需要密码，当前未取得设计稿资源。' : state.accessRestriction ? '该分享已关闭或过期。' : '未获取到与该分享关联的设计稿预览；当前访问响应未提供可用资源。',
+    warningText: complete ? undefined : count ? '仅取得目标预览，设计稿完整性尚未确认。' : '分享页面可读取，但未取得目标设计稿资源。',
+    metadata: { inputUrl: redact(state.inputUrl || state.url), normalizedUrl: redact(state.url), resolvedUrl: redact(state.resolvedUrl),
+      shareId: state.shareId, designIds: [...state.designIds], pageCountEvidence: state.evidence, diagnostics: state.diagnostics } };
+}
 
+function shouldAttemptDynamicAfterStatic(result) {
+  return !result || result.isComplete !== true;
+}
+
+function selectPreferredResult(primary, secondary) {
+  if (!primary) return secondary || null;
+  if (!secondary) return primary;
+  const rank = r => (r.isComplete === true ? 10000 : 0) + (r.pages || []).filter(p => p.resourceRole === 'page_preview').length * 100 +
+    (/design-json|network|html-preview/.test(r.source || '') ? 10 : 0);
+  return rank(secondary) > rank(primary) ? secondary : primary;
+}
+
+async function staticScraping(url, linkType, options = {}, state = createExtractionState(url, options)) {
   try {
-    const launchOptions = {
-      headless: options.headless === false ? false : "new",
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-      ],
-    };
+    const response = await axios.get(url, { headers: GAODING_HEADERS, timeout: Number(options.timeout) || STATIC_TIMEOUT,
+      maxContentLength: 4 * 1024 * 1024, maxRedirects: 5, validateStatus: () => true });
+    state.resolvedUrl = response.request?.res?.responseUrl || url;
+    diagnose(state, 'static', { status: response.status, resolvedUrl: redact(state.resolvedUrl) });
+    if (response.status === 200) collectHtmlData(String(response.data), state, 'html-preview');
+    await fetchPublicShareData(state);
+    await fetchDesignJsonPageUrls(state);
+  } catch (error) { diagnose(state, 'static', { reason: error.code || error.name }); }
+  return finalizeState(state, linkType);
+}
 
-    browser = await puppeteer.launch(
-      withPuppeteerExecutablePath(launchOptions)
-    );
+async function dynamicScraping(url, linkType, options = {}, state = createExtractionState(url, options)) {
+  const pool = options.browserPool || getDefaultPool();
+  let browser, page;
+  const pending = new Set();
+  let accepting = true, readCount = 0;
+  try {
+    browser = await pool.acquire(10000);
     page = await browser.newPage();
-    const responseTasks = [];
-    const networkStructuredEntries = [];
-    const networkLooseEntries = [];
-    const networkPreviewBundleEntries = [];
-
-    page.on("response", (response) => {
-      responseTasks.push(
-        (async () => {
-          const resourceType = response.request().resourceType();
-          const contentType = String(
-            (response.headers() && response.headers()["content-type"]) || ""
-          ).toLowerCase();
-          const contentLength = Number(
-            (response.headers() && response.headers()["content-length"]) || 0
-          );
-
-          if (contentLength && contentLength > 2 * 1024 * 1024) {
-            return;
-          }
-
-          const shouldReadText =
-            ["document", "xhr", "fetch"].includes(resourceType) ||
-            contentType.includes("json") ||
-            contentType.includes("html") ||
-            contentType.includes("text") ||
-            contentType.includes("javascript");
-
-          if (!shouldReadText) {
-            return;
-          }
-
-          const payloadText = await response.text().catch(() => "");
-          if (!payloadText || payloadText.length > 2 * 1024 * 1024) {
-            return;
-          }
-
-          const hintRoot = `network.${resourceType}`;
-          const previewBundleEntries = extractPreviewBundleFromHtml(payloadText).map(
-            ([imageUrl, hint]) => [imageUrl, hint.replace(/^html/i, hintRoot)]
-          );
-
-          if (previewBundleEntries.length) {
-            networkPreviewBundleEntries.push(...previewBundleEntries);
-          }
-
-          const trimmedPayload = decodeHtmlText(payloadText).trim();
-          if (trimmedPayload && ["{", "["].includes(trimmedPayload[0])) {
-            try {
-              const data = JSON.parse(trimmedPayload);
-              networkStructuredEntries.push(
-                ...extractCandidatesFromData(data, hintRoot)
-              );
-            } catch {
-              // Ignore non-JSON payloads.
-            }
-          }
-
-          networkLooseEntries.push(
-            ...extractContextualUrlsFromText(payloadText).map(
-              ([imageUrl], index) => [imageUrl, `${hintRoot}.text[${index}]`]
-            )
-          );
-        })().catch(() => {})
-      );
+    page.on('response', response => {
+      const type = response.request().resourceType();
+      const contentType = String(response.headers()['content-type'] || '');
+      if (!accepting || readCount >= 80 || !['document', 'fetch', 'xhr'].includes(type) || !/json|html|text\/plain/i.test(contentType)) return;
+      readCount++;
+      const task = (async () => {
+        if (Number(response.headers()['content-length'] || 0) > 4 * 1024 * 1024) return;
+        const responseUrl = response.url();
+        const associated = responseUrl === url || (state.shareId && responseUrl.includes(state.shareId)) || [...state.designIds].some(id => responseUrl.includes(id));
+        if ([401, 403].includes(response.status()) && associated) diagnose(state, 'network', { url: redact(responseUrl), status: response.status(), reason: 'access_denied' });
+        if (response.status() !== 200) return;
+        const body = await response.text().catch(() => '');
+        if (body.length > 4 * 1024 * 1024) return;
+        if (type === 'document' && responseUrl === page.url()) collectHtmlData(body, state, 'dynamic-html-preview');
+        else {
+          try { collectDesignData(JSON.parse(body), state, { trusted: Boolean(associated), source: 'dynamic-network-preview', path: `network:${redact(responseUrl)}` }); }
+          catch { /* Non-JSON network text cannot establish design ownership. */ }
+        }
+      })().catch(error => diagnose(state, 'network', { reason: error.code || error.name }));
+      pending.add(task); task.finally(() => pending.delete(task));
     });
-
+    page.on('pageerror', error => diagnose(state, 'browser_script', { reason: String(error.message).slice(0, 200) }));
     await page.setViewport({ width: 1600, height: 1200 });
-    await page.setUserAgent(GAODING_HEADERS["User-Agent"]);
-    await page.setExtraHTTPHeaders({
-      "Accept-Language": GAODING_HEADERS["Accept-Language"],
-    });
-
-    await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: Math.max(Number(options.timeout) || 0, DYNAMIC_TIMEOUT),
-      referer: GAODING_HEADERS.Referer,
-    });
-
+    await page.setUserAgent(GAODING_HEADERS['User-Agent']);
+    await page.setExtraHTTPHeaders({ 'Accept-Language': GAODING_HEADERS['Accept-Language'] });
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: DYNAMIC_TIMEOUT, referer: GAODING_HEADERS.Referer });
+    state.resolvedUrl = page.url();
     await page.waitForTimeout(2000);
-    await page.evaluate(() => {
-      window.scrollBy(0, Math.max(window.innerHeight, 900));
-    });
+    await page.evaluate(() => window.scrollBy(0, Math.max(window.innerHeight, 900)));
     await page.waitForTimeout(1500);
-    await Promise.allSettled(responseTasks);
-
-    const renderedHtml = await page.content();
-    const renderedResult = await analyzeHtmlContent(
-      renderedHtml,
-      url,
-      linkType,
-      "dynamic"
-    );
-
-    const visibleUrls = await page.evaluate(() => {
-      const seen = new Set();
-      const urls = [];
-
-      const addUrl = (value) => {
-        if (typeof value !== "string") {
-          return;
-        }
-
-        const normalized = value.trim();
-        if (!normalized || seen.has(normalized)) {
-          return;
-        }
-
-        seen.add(normalized);
-        urls.push(normalized);
-      };
-
-      document.querySelectorAll("img").forEach((image) => {
-        [
-          image.src,
-          image.getAttribute("src"),
-          image.getAttribute("data-src"),
-          image.getAttribute("data-original"),
-          image.getAttribute("data-url"),
-        ].forEach(addUrl);
-
-        const srcset = image.getAttribute("srcset") || "";
-        srcset
-          .split(",")
-          .map((item) => item.trim().split(/\s+/)[0])
-          .forEach(addUrl);
-      });
-
-      document.querySelectorAll("source").forEach((source) => {
-        [source.src, source.getAttribute("src"), source.getAttribute("srcset")]
-          .filter(Boolean)
-          .forEach((value) => {
-            String(value)
-              .split(",")
-              .map((item) => item.trim().split(/\s+/)[0])
-              .forEach(addUrl);
-          });
-      });
-
-      document.querySelectorAll("video").forEach((video) => {
-        addUrl(video.poster);
-        addUrl(video.getAttribute("poster"));
-      });
-
-      document.querySelectorAll("*").forEach((element) => {
-        try {
-          const backgroundImage =
-            window.getComputedStyle(element).backgroundImage || "";
-          const matches = backgroundImage.matchAll(
-            /url\(["']?([^"'()]+)["']?\)/g
-          );
-          for (const match of matches) {
-            addUrl(match[1]);
-          }
-        } catch {
-          // Ignore style access failures.
-        }
-      });
-
-      return urls;
-    });
-
-    const visibleEntries = visibleUrls.map((candidateUrl, index) => [
-      candidateUrl,
-      `dynamic-visible[${index}]`,
-    ]);
-
-    let supplementalResult = null;
-    const structuredNetworkEntries = dedupeEntries(networkStructuredEntries);
-    const previewBundleNetworkEntries = dedupeEntries(networkPreviewBundleEntries);
-    const looseNetworkEntries = dedupeEntries(networkLooseEntries);
-
-    if (previewBundleNetworkEntries.length) {
-      const validUrls = await validatePrimaryUrlsInOrder(
-        previewBundleNetworkEntries.map(([imageUrl]) => imageUrl)
-      );
-      if (validUrls.length >= 2) {
-        supplementalResult = buildResult(
-          validUrls,
-          url,
-          "dynamic-network-preview-bundle",
-          "browser_network_preview_bundle",
-          linkType,
-          1820
-        );
+    collectHtmlData(await page.content(), state, 'dynamic-html-preview');
+    // Bounded lazy page activation, scoped to the actual viewer rather than recommendations.
+    const buttons = await page.$$('#dam-preview-container [data-page-number], #dam-preview-container button[data-page]');
+    for (const button of buttons.slice(0, 10)) {
+      if (Date.now() >= state.deadline) break;
+      await button.click().catch(() => {}); await page.waitForTimeout(350);
+      collectHtmlData(await page.content(), state, 'dynamic-html-preview');
+    }
+    await Promise.allSettled([...pending]);
+    await fetchDesignJsonPageUrls(state);
+    const current = await finalizeState(state, linkType);
+    if (!current.isComplete) {
+      const visible = await page.evaluate((designIds) => {
+        const viewer = document.querySelector('#dam-preview-container');
+        if (!viewer) return [];
+        return [...viewer.querySelectorAll('img')].filter(img => img.complete && img.naturalWidth > 0 && img.getClientRects().length).map(img => {
+          const owner = img.closest('[fileid], [data-file-id], [data-design-id]');
+          const id = owner?.getAttribute('fileid') || owner?.getAttribute('data-file-id') || owner?.getAttribute('data-design-id');
+          if (!id || !designIds.includes(id)) return null;
+          const pageNode = img.closest('[data-page-number], [data-page-id]');
+          return { url: img.currentSrc, designId: id, width: img.naturalWidth, height: img.naturalHeight,
+            pageId: pageNode?.getAttribute('data-page-id'), pageNumber: Number(pageNode?.getAttribute('data-page-number')) || null };
+        }).filter(Boolean);
+      }, [...state.designIds]);
+      for (const image of visible) {
+        const url = safeImageUrl(image.url, state.resolvedUrl);
+        if (!url || /\.(?:svg|ico)(?:\?|$)/i.test(url)) continue;
+        const dimensions = state.designDimensions.get(image.designId);
+        if (dimensions && Math.abs((image.width / image.height) / (dimensions.width / dimensions.height) - 1) > 0.08) continue;
+        state.candidates.push({ ...image, url, source: 'dynamic-visible', resourceRole: dimensions ? 'page_preview' : 'visible_preview', score: 200,
+          pageKey: image.pageId ? `id:${image.pageId}` : image.pageNumber ? `page:${image.pageNumber}` : 'primary',
+          evidencePath: 'dom.#dam-preview-container[fileId].img', selectionReason: 'target_viewer_fallback_structured_resources_unavailable' });
       }
+      diagnose(state, 'dynamic-visible', { associatedViewerImages: visible.length, reason: 'structured_result_incomplete', structuredCandidates: state.candidates.filter(c => c.source !== 'dynamic-visible').length });
     }
-
-    if (!supplementalResult && structuredNetworkEntries.length) {
-      const groupedEntries = selectBestMultiPageGroup(structuredNetworkEntries);
-      if (groupedEntries.length) {
-        const validUrls = await validatePrimaryUrlsInOrder(
-          groupedEntries.map(([imageUrl]) => imageUrl)
-        );
-        if (validUrls.length >= 2) {
-          supplementalResult = buildResult(
-            validUrls,
-            url,
-            "dynamic-network-multi-page",
-            "browser_network_group",
-            linkType,
-            1720
-          );
-        }
-      }
-    }
-
-    const preferredDynamicResult = selectPreferredResult(
-      renderedResult,
-      supplementalResult,
-      linkType
-    );
-    if (preferredDynamicResult) {
-      return preferredDynamicResult;
-    }
-
-    const bestVisibleUrl = await pickBestPrimarySingleCandidate(
-      structuredNetworkEntries.concat(looseNetworkEntries, visibleEntries),
-      linkType,
-      8
-    );
-    if (bestVisibleUrl) {
-      return buildResult(
-        [bestVisibleUrl],
-        url,
-        "dynamic-visible",
-        "browser_visible_candidate",
-        linkType,
-        1200
-      );
-    }
-
-    return null;
-  } catch {
-    return null;
-  } finally {
-    if (page) {
-      await page.close().catch(() => {});
-    }
-    if (browser) {
-      await browser.close().catch(() => {});
-    }
+  } catch (error) { diagnose(state, 'dynamic', { reason: error.code || error.name, message: String(error.message).slice(0, 160) }); }
+  finally {
+    accepting = false;
+    if (page) await page.close().catch(() => {});
+    await Promise.allSettled([...pending]);
+    if (browser) pool.release(browser);
   }
+  return finalizeState(state, linkType);
 }
 
-async function extractGaoding(url, options = {}) {
-  const normalizedUrl = normalizeGaodingInputUrl(url);
-  if (!normalizedUrl) {
-    return buildFailureResult("missing_url", url);
-  }
-
-  const linkType = classifyLink(normalizedUrl);
-
-  try {
-    const staticResult = await staticScraping(normalizedUrl, linkType, options);
-    if (staticResult && !shouldAttemptDynamicAfterStatic(staticResult, linkType)) {
-      return staticResult;
-    }
-
-    if (linkType === "listing") {
-      return (
-        staticResult ||
-        buildFailureResult("gaoding_listing_not_supported", normalizedUrl, {
-          linkType,
-        })
-      );
-    }
-
-    const dynamicResult = await dynamicScraping(
-      normalizedUrl,
-      linkType,
-      options
-    );
-    const preferredResult = selectPreferredResult(
-      staticResult,
-      dynamicResult,
-      linkType
-    );
-    if (preferredResult) {
-      return preferredResult;
-    }
-
-    return buildFailureResult("gaoding_image_not_found", normalizedUrl, {
-      linkType,
-    });
-  } catch (error) {
-    return buildFailureResult(error, normalizedUrl, { linkType });
-  }
+async function extractGaoding(inputUrl, options = {}) {
+  const url = normalizeGaodingInputUrl(inputUrl);
+  if (!url) return buildFailureResult('missing_url', inputUrl);
+  const state = createExtractionState(url, options); state.inputUrl = inputUrl;
+  const linkType = classifyLink(url);
+  diagnose(state, 'url', { inputUrl: redact(inputUrl), normalizedUrl: redact(url), shareId: state.shareId, linkType });
+  const result = await staticScraping(url, linkType, options, state);
+  if (!shouldAttemptDynamicAfterStatic(result) || linkType === 'listing' || options.staticOnly || Date.now() >= state.deadline || state.accessRestriction) return result;
+  return dynamicScraping(url, linkType, options, state);
 }
 
 module.exports = {
@@ -1872,5 +1607,12 @@ module.exports = {
     buildResult,
     shouldAttemptDynamicAfterStatic,
     selectPreferredResult,
+    createExtractionState,
+    collectDesignData,
+    collectHtmlData,
+    finalizeState,
+    staticScraping,
+    dynamicScraping,
+    safeImageUrl,
   },
 };

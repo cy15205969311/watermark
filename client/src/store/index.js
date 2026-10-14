@@ -210,21 +210,23 @@ export default createStore({
   },
 
   actions: {
-    async fetchHistory({ commit }) {
+    async fetchHistory({ commit, state }) {
+      const initialIds = new Set(state.history.map(record => record.id));
       try {
-        commit("SET_LOADING", true);
         const { data } = await api.get("/history");
         if (data.success) {
+          const fetched = (data.data || []).map(record => normalizeRecord(record));
+          const fetchedIds = new Set(fetched.map(record => record.id));
+          // Background history can finish after a new parse has been saved.
+          const addedDuringFetch = state.history.filter(record => !initialIds.has(record.id) && !fetchedIds.has(record.id));
           commit(
             "SET_HISTORY",
-            (data.data || []).map((record) => normalizeRecord(record))
+            [...addedDuringFetch, ...fetched]
           );
         }
       } catch (error) {
         console.error("获取历史记录失败:", error);
         commit("SET_ERROR", error.message);
-      } finally {
-        commit("SET_LOADING", false);
       }
     },
 
@@ -233,7 +235,8 @@ export default createStore({
       input
     ) {
       try {
-        commit("SET_LOADING", true);
+        // App owns loading across extraction AND saving. This action must not
+        // release that lock before the full user operation has finished.
         commit("SET_ERROR", null);
 
         const { url, platform, thumbnailUrl, imageUrl, imageUrls, pages, pageCount, isMultiPage, status } = input;
@@ -249,18 +252,17 @@ export default createStore({
           isMultiPage,
           status: normalizeRecordStatus(status),
           clientId: getClientId(),
-        });
+        }, { timeout: 30000 });
 
-        if (data.success) {
-          const frontendRec = normalizeRecord(data.data);
-          commit("ADD_RECORD", frontendRec);
-          return frontendRec;
+        if (!data?.success || !data.data || typeof data.data !== "object" || Array.isArray(data.data)) {
+          throw new Error(data?.message || "保存解析记录失败，请重试");
         }
+        const frontendRec = normalizeRecord(data.data);
+        commit("ADD_RECORD", frontendRec);
+        return frontendRec;
       } catch (error) {
         commit("SET_ERROR", error.response?.data?.message || "解析失败");
         throw error;
-      } finally {
-        commit("SET_LOADING", false);
       }
     },
 

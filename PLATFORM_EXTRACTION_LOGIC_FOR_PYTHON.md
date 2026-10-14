@@ -438,207 +438,51 @@ async function scrapeChuangkitEnhanced(pageUrl)
 
 ## 7. 稿定设计
 
-### 7.1 主要文件
+### 7.1 入口与流程
 
-- `server/extractors/gaoding.js`
-- `server/imageExtractor.js`
-
-### 7.2 主函数
-
-```js
-async function extractGaoding(url, options = {})
-```
-
-总流程：
+主要实现为 `server/extractors/gaoding.js` 的 `extractGaoding()`，由 `server/imageExtractor.js` 分发。稿定使用与目标分享关联的本地数据，避免第三方网关无关联图片直接成为结果。
 
 ```text
-1. normalizeGaodingInputUrl(url)
-2. classifyLink(normalizedUrl)
-3. staticScraping(normalizedUrl, linkType)
-4. 如果静态结果足够好且不需要继续追动态:
-     -> 直接返回
-5. 如果 linkType 是 listing:
-     -> 返回静态结果或 not_supported
-6. dynamicScraping(normalizedUrl, linkType)
-7. selectPreferredResult(staticResult, dynamicResult, linkType)
-8. 若都失败 -> buildFailureResult("gaoding_image_not_found")
+URL 规范化（只清理确认属于分享文案的 fragment）
+  -> 静态 HTML 的 script JSON / web-widget contextdata
+  -> 公开分享接口 /api/dam/shares/:code/resource
+  -> 该分享 file_ids 对应的 /api/dam/asset/:id
+  -> 可信预览字段与 design_info.url 对应的设计 JSON
+  -> 解析 pages / layouts，验证整页图片与页面分组
+  -> 未确认完整时继续浏览器池动态 HTML / 相关网络 JSON
+  -> 有目标预览区、文件 ID 及图像证据时允许 dynamic-visible 兜底
 ```
 
-### 7.3 URL 预处理
+普通渠道头来自稿定公开客户端配置。分享需要密码、已关闭或过期时，报告限制并停止设计资源请求；不附加登录凭证、不关闭 TLS 验证。
 
-`normalizeGaodingInputUrl()` 会把分享文案经常附带的 `#...` hash 去掉。
+### 7.2 页面与来源判定
 
-这一步对稿定尤其重要，因为用户经常复制出这种链接：
+`collectDesignData()` 跳过普通元素、推荐、UI 等分支，收集页面级 `source_preview_info`、`preview_info` 及缩略图等字段。每个候选保留分享/设计/页面标识、证据字段路径、资源角色及验证结果。
 
-```text
-https://www.gaoding.com/dam/share/xxxx#我分享了...
-```
+`pages[]` 优先作为页面结构；等价 `layouts[]` 可以按页面 ID 补充预览，缺少 ID 且数量相同时按位置对齐。不同分辨率在同一页面分组中选主图；`extends_previews` 没有页面标识时作为同页版本，不能单凭数量认定多页。
 
-如果不先去掉 hash，后续分类和请求都容易偏掉。
+`fetchDesignJsonPageUrls()` 在静态阶段继续读取所有已关联设计 JSON，即使 HTML 已有封面或多图。真实单页 JSON 与多页 JSON 都支持。
 
-### 7.4 链接分类
+`finalizeState()` 使用图像响应类型、真实尺寸、已知宽高比及字段角色进行验证。签名 URL 保持原参数，来源可靠的长海报不会因为通用尺寸阈值被拒绝。
 
-`classifyLink(url)` 目前会分成：
+### 7.3 完整性与动态兜底
 
-- `share`
-- `template`
-- `editor`
-- `detail`
-- `creation`
-- `listing`
+`pageCount` 是实际输出数量；`expectedPageCount` 只取可靠页面数据，不从图片数量或资源文件名猜测。新增字段与图怪兽现有结构一致：`collectedPageCount`、`pageCountConfidence`、`completenessStatus`、`isComplete`、`missingPages`。
 
-这个分类会影响：
+仅数量证据与有效整页资源一致时标为完整。只取得封面或缩略图时保留部分状态；总页数未知时 `isComplete: null`、`completenessStatus: unknown`。
 
-- 静态结果是否足够
-- 动态抓取是否继续执行
-- 单图打分偏好
-- 多页结果优先级
+`dynamic-visible` 保留，限定在 `#dam-preview-container` 中匹配目标文件 ID 的已加载图片。有可靠单页数量与匹配整页尺寸时可以完整成功；仅存在可见图而没有完整性证据时仍为未知。
 
-### 7.5 静态抓取链路
+动态阶段复用现有浏览器池，限制网络响应数量、正文大小、分页次数与请求预算。最终日志记录实际来源、数量和证据，避免将“取得一张图”等同于“完整提取成功”。
 
-静态入口：
+### 7.4 验证
 
-```js
-async function staticScraping(url, linkType, options = {})
-```
+- `node test-gaoding.js`：辅助函数回归。
+- `node --test test-gaoding-regression.js`：本地 HTML/JSON、真实图像、浏览器和隔离数据库 HTTP 回归。
+- `node verify-gaoding-live.js [url]`：真实 HTTP 联网验证，禁止生产数据库写入。
+- 专项前端回归：`server/test-gaoding-ui.py`，通过 webapp-testing 的 with_server 启动 Vite。
 
-内部核心是 `analyzeHtmlContent(htmlContent, originalUrl, linkType, stage)`。
-
-它会同时收集：
-
-- `extractMetaCandidates($)`
-- `extractDomCandidates($)`
-- `extractJsonCandidates($)`
-- `extractContextualUrlsFromText(text)`
-- `extractPreviewBundleFromHtml(html)`
-
-优先级大致是：
-
-```text
-1. 先找 preview bundle（source_preview_info + extends_previews）
-2. 再找 JSON 中成组的多页候选
-3. 再找 meta 单图
-4. 最后在所有候选里选最佳单图
-```
-
-### 7.6 稿定的多页静态补强
-
-这是当前稿定逻辑里最重要的一层增强。
-
-除了直接分析 HTML，静态阶段还会：
-
-1. 通过 `extractDesignInfoUrlFromHtml(html)` 提取 `design_info.url`
-2. 请求这个 JSON 地址：`fetchDesignJsonPageUrls(designInfoUrl)`
-3. 进入 `extractPagePreviewUrlsFromDesignData(data)`
-4. 从 `pages[].preview_info.url`、`source_preview_info.url`、`thumbnail.url`、`elements[].preview_info.url` 等字段中为每一页选最佳图
-
-这一步是近期稿定多页恢复的关键，因为很多分享页 HTML 只放单张封面，但更完整的分页预览藏在 `design_info.url` 对应的设计 JSON 里。
-
-### 7.7 为什么静态单图后还要继续动态
-
-关键函数：
-
-- `shouldAttemptDynamicAfterStatic(staticResult, linkType)`
-
-它的判定逻辑是：
-
-- 静态没结果 -> 继续动态
-- 静态已经拿到多页 -> 不再动态
-- 链接类型不是 `share/detail/editor/creation` -> 通常不继续
-- 静态来源像 `candidate` / `meta` / `cover` / `preview`，或者分数偏低 -> 继续动态
-
-也就是说，稿定当前不是“静态有图就结束”，而是“静态如果只是封面级结果，就继续追动态多页”。
-
-### 7.8 动态抓取链路
-
-动态入口：
-
-```js
-async function dynamicScraping(url, linkType, options = {})
-```
-
-它做三类收集：
-
-#### 7.8.1 页面渲染后的 HTML 再分析
-
-- `page.content()`
-- 再跑一次 `analyzeHtmlContent(..., stage = "dynamic")`
-
-#### 7.8.2 监听网络响应
-
-在 Puppeteer `response` 里额外抓：
-
-- `networkStructuredEntries`
-- `networkPreviewBundleEntries`
-- `networkLooseEntries`
-
-其中：
-
-- `networkPreviewBundleEntries` 适合直接恢复多页 bundle
-- `networkStructuredEntries` 适合从 JSON 中抽一组页面图
-- `networkLooseEntries` 作为兜底单图池
-
-#### 7.8.3 可见 DOM 资源
-
-页面滚动后收集：
-
-- `img.src`
-- `data-src`
-- `srcset`
-- `video.poster`
-- CSS `background-image`
-
-这些会进入 `visibleEntries` 供单图兜底选择。
-
-### 7.9 动态结果如何选择
-
-关键函数：
-
-- `selectPreferredResult(primaryResult, secondaryResult, linkType)`
-- `getResultPageCount(result)`
-
-评分策略对多页明显倾斜：
-
-- 多页结果直接加大分
-- `preview-bundle` 和 `multi-page` 来源额外加分
-- `dynamic` 来源在分享/详情类链接上加分
-- `design-json` 结果额外加分
-- `candidate` / `meta` / `cover` 这类弱来源会扣分
-
-这也是为什么当前稿定能在“静态命中封面、动态命中套图”时自动偏向套图结果。
-
-### 7.10 稿定的候选过滤与验证
-
-关键函数：
-
-- `isGaodingDesignCandidate()`
-- `scoreCandidate(imageUrl, hint, linkType)`
-- `selectBestMultiPageGroup(entries)`
-- `validateGaodingImageUrl()`
-
-主要特征：
-
-- 优先保留 `dancf.com`、`gaoding.com`、`gaoding.cn` 的设计资源
-- `source_preview_info`、`original_preview_info`、`download_url`、`page`、`artboard`、`slide` 这类字段大幅加分
-- `watermark`、`with_wm`、`meta封面`、过度缩略图会被降权
-- 验证时会带稿定站点头，并在 HEAD 失败时降级到 Range GET
-
-### 7.11 稿定 Python 迁移时必须保留的点
-
-- 一定先清理 URL 中 hash 文案。
-- 一定保留 `design_info.url -> pages[]` 这条静态多页链路。
-- 静态只拿到单图时不要立即结束，必须继续动态抓取。
-- 动态阶段要同时看渲染 HTML、网络 JSON、可见 DOM，不要只抓截图。
-
-### 7.12 稿定常见 source
-
-- `html-preview-bundle`
-- `json-multi-page`
-- `design-json-pages`
-- `dynamic-network-preview-bundle`
-- `dynamic-network-multi-page`
-- `dynamic-visible`
-- `static-candidate`
+当前复现的真实证据、资源 URL、图片与限制见 `GAODING_FIX_REPORT.md`。常见来源为 `share-api-preview`、`html-preview`、`design-json-pages`、`dynamic-network-preview`、`dynamic-html-preview`、`dynamic-visible`。
 
 ## 8. 花瓣网
 
