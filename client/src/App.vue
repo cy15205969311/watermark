@@ -372,6 +372,15 @@ function normalizePages(pages, fallbackUrls = []) {
 }
 
 async function downloadRecordImages(record, format = 'jpg') {
+  activeDownloads.value++
+  try {
+    return await saveRecordImages(record, format)
+  } finally {
+    activeDownloads.value--
+  }
+}
+
+async function saveRecordImages(record, format = 'jpg') {
   const urls = getRecordImageUrls(record)
   if (!urls.length) return
 
@@ -839,6 +848,19 @@ const uploadDialogVisible = ref(false)
 const uploadFile = ref(null)
 const uploadPreview = ref('')
 const uploading = ref(false)
+const activeDownloads = ref(0)
+const desktopBusy = computed(() => loading.value || uploading.value || activeDownloads.value > 0 || batchDeleting.value)
+watch(desktopBusy, active => window.desktop?.setBusy?.(active), { immediate: true, flush: 'sync' })
+const protectActiveWork = event => {
+  if (!window.desktop || !desktopBusy.value) return
+  event.preventDefault()
+  event.returnValue = ''
+}
+let removeDesktopTutorialListener
+onMounted(() => {
+  removeDesktopTutorialListener = window.desktop?.onShowTutorial?.(openHelp)
+  if (window.desktop) window.addEventListener('beforeunload', protectActiveWork)
+})
 const selectedAlgorithm = ref('auto')
 const uploadStatus = ref('')
 
@@ -977,6 +999,9 @@ watch(selectedAlgorithm, () => {
 })
 
 onBeforeUnmount(() => {
+  removeDesktopTutorialListener?.()
+  window.removeEventListener('beforeunload', protectActiveWork)
+  window.desktop?.setBusy?.(false)
   revokeUploadPreview()
 })
 </script>

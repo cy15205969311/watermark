@@ -14,6 +14,14 @@
 
 卸载只删除程序及所属范围的快捷方式，保留个人数据。本版采用安全保留方案，不提供自动删除个人数据的复选框，也拒绝 `--delete-app-data` 参数。安装使用说明与 MIT、第三方开源许可分开；许可清单位于安装目录 `resources/licenses`，发布前需审阅版权归属及说明文本。
 
+## 桌面菜单与图标
+
+当前 1.1.1 候选包合入菜单体验修复，版本号未变。顶部为“应用 / 编辑 / 查看 / 帮助”：应用可打开日志文件夹、个人数据文件夹或退出；编辑保留 Ctrl+Z/Y/X/C/V/A；查看提供刷新、恢复默认缩放、放大、缩小；帮助复用现有使用教程，并提供日志和真实版本信息。
+
+输入框右键使用中文编辑操作，按 Chromium 的编辑状态启用；已选普通文本只提供复制，图片和空白区域不添加未实现的命令。解析、上传、批量删除或下载期间刷新会先提示，默认取消刷新。若主动选择“仍然刷新”，当前界面尚未保存的状态可能丢失，后台任务不保证随刷新取消。F5 等刷新路径也受 beforeunload 保护；退出菜单沿用正常资源清理。
+
+窗口、应用 EXE、安装器和卸载器配置统一引用 `desktop/assets/DesignExtractor-Personal-icon.ico`。构建不再从旧 SVG 重生成图标。EXE/安装包的 7 个 ICO 图像资源已做二进制比对；已安装快捷方式与卸载器的视觉效果仍需专用环境验收。菜单实际截图、测试结果与新散列见 [菜单与图标报告](DESKTOP_MENU_REPORT.md)。本轮未增加设置中心或更新服务。
+
 ## 服务器版保持原启动方式
 
 ```powershell
@@ -39,6 +47,7 @@ npm run test:mysql
 npm run test:mysql:live
 npm run test:desktop
 npm run test:desktop:main
+npm run test:desktop:menus
 npm run desktop:dev
 ```
 

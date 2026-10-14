@@ -50,7 +50,7 @@ async function prepare() {
   copyJavaScript(path.join(root, 'server'), path.join(application, 'server'));
   fs.cpSync(frontendOutput, path.join(application, 'client'), { recursive: true });
   fs.mkdirSync(path.join(application, 'desktop'), { recursive: true });
-  for (const name of ['main.cjs', 'preload.cjs', 'backend.cjs', 'security.cjs', 'config.cjs', 'logging.cjs']) {
+  for (const name of ['main.cjs', 'preload.cjs', 'backend.cjs', 'security.cjs', 'config.cjs', 'logging.cjs', 'menus.cjs']) {
     fs.copyFileSync(path.join(root, 'desktop', name), path.join(application, 'desktop', name));
   }
   const serverPackage = JSON.parse(fs.readFileSync(path.join(root, 'server/package.json')));
@@ -83,14 +83,12 @@ async function prepare() {
   const stagedChrome = path.join(browserDirectory, 'chrome-win64');
   if (!sameBrowserFiles(chromeFolder, stagedChrome)) fs.cpSync(chromeFolder, stagedChrome, { recursive: true });
   fs.writeFileSync(path.join(browserDirectory, 'manifest.json'), JSON.stringify({ executable: 'chrome-win64/chrome.exe', chromeVersion: buildId, puppeteerVersion: require(path.join(application, 'node_modules/puppeteer/package.json')).version }, null, 2));
-  // A simple source-controlled vector mark; ICO contains a PNG at 256px.
-  const sharp = require(path.join(application, 'node_modules/sharp'));
-  const png = await sharp(Buffer.from(fs.readFileSync(path.join(root, 'desktop/assets/icon.svg')))).resize(256, 256).png().toBuffer();
-  const header = Buffer.alloc(22); header.writeUInt16LE(1, 2); header.writeUInt16LE(1, 4); header.writeUInt16LE(1, 10); header.writeUInt16LE(32, 12); header.writeUInt32LE(png.length, 14); header.writeUInt32LE(22, 18);
-  const icon = Buffer.concat([header, png]);
-  fs.writeFileSync(path.join(root, 'desktop/assets/icon.ico'), icon);
+  // Preserve the supplied multi-resolution ICO; never regenerate it from the
+  // obsolete SVG or overwrite a source asset during a build.
+  const icon = fs.readFileSync(path.join(root, 'desktop/assets/DesignExtractor-Personal-icon.ico'));
+  if (icon.readUInt16LE(0) !== 0 || icon.readUInt16LE(2) !== 1 || icon.readUInt16LE(4) < 1) throw new Error('应用图标不是有效 ICO');
   fs.mkdirSync(path.join(application, 'desktop/assets'), { recursive: true });
-  fs.writeFileSync(path.join(application, 'desktop/assets/icon.ico'), icon);
+  fs.writeFileSync(path.join(application, 'desktop/assets/DesignExtractor-Personal-icon.ico'), icon);
   require('./notices.cjs').generateNotices(root, application);
   require('./nsis-templates.cjs').prepareNsisTemplates(root);
   console.log('Desktop staged', { application, chromeVersion: buildId, puppeteerVersion: require(path.join(application, 'node_modules/puppeteer/package.json')).version });

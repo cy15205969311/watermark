@@ -1,6 +1,6 @@
 # Windows 桌面个人版交付记录
 
-最新候选包及本轮验证状态见 [DESKTOP_1.1.1_REPORT.md](DESKTOP_1.1.1_REPORT.md)；1.1.1 尚未执行真实安装验收。
+最新候选包菜单、图标与散列见 [DESKTOP_MENU_REPORT.md](DESKTOP_MENU_REPORT.md)，安装器阶段见 [DESKTOP_1.1.1_REPORT.md](DESKTOP_1.1.1_REPORT.md)；1.1.1 尚未执行真实安装验收。
 
 此文件保留 1.0.0 桌面工程基线。1.1.0 安装体验升级及当前验收状态见 [DESKTOP_1.1.0_REPORT.md](DESKTOP_1.1.0_REPORT.md)，请勿将旧版验收结论套用到新版安装向导或全用户安装。
 

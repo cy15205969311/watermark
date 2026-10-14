@@ -75,6 +75,33 @@ async function run() {
   const first = await launch();
   if (!installed) assert.ok(first.info.userData.startsWith(isolatedProfile + path.sep));
   results.push({ name: 'Packaged app runs with Chinese/space installation path and no Node/Chrome on PATH', info: first.info });
+  if (process.argv.includes('--menu-ui')) {
+    if (process.argv.includes('--menu-busy-fixture')) {
+      // Hold an isolated local extraction fixture for native warning screenshots;
+      // no platform request, daily history write or database mutation is sent.
+      first.page.on('dialog', () => {}); // Electron owns beforeunload confirmation.
+      let release;
+      await first.page.route('**/api/extract-image', async route => {
+        await new Promise(resolve => { release = resolve; });
+        await route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ success: false, message: '本地菜单验收夹具结束' }) }).catch(() => {});
+      });
+      application.process().once('exit', () => release?.());
+      await first.page.locator('textarea').first().fill('https://818ps.com/?share_id=local-menu-fixture');
+      await first.page.getByRole('button', { name: '解析链接' }).click();
+      await first.page.getByRole('button', { name: '解析中，请稍候…' }).waitFor();
+    }
+    const stateFile = path.join(root, 'server/test-artifacts/menu-ui-session.json');
+    fs.writeFileSync(stateFile, JSON.stringify({ executable, destination, isolatedProfile, productionBundleInstrumentedForIsolation: !installed }, null, 2));
+    console.log('Menu UI session ready:', executable);
+    // Finite observation session, no fixture writes. Close via the real menu.
+    await new Promise(resolve => {
+      const timer = setTimeout(resolve, 15 * 60 * 1000);
+      application.process().once('exit', () => { clearTimeout(timer); application = null; resolve(); });
+    });
+    if (application) await shutdown();
+    return;
+  }
+  results.push(await require('./menu-runtime.cjs').verifyMenus(application, first.page));
   const history = await request(first.page, '/history'); beforeIds = history.data.data.map(record => record.id);
   const p1 = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aOwAAAABJRU5ErkJggg==';
   const pages = Array.from({ length: 3 }, (_, i) => ({ page: i + 1, pageNumber: i + 1, pageId: `p${i + 1}`, designId: 'packaged-fixture', imageUrl: p1 }));

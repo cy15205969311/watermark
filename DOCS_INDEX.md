@@ -7,6 +7,7 @@
 - [PROJECT_ARCHITECTURE.md](PROJECT_ARCHITECTURE.md)：当前仓库的真实目录结构、模块职责、浏览器服务与提取链路分层说明，适合新成员快速建立代码认知。
 
 ### 桌面应用
+- [DESKTOP_MENU_REPORT.md](DESKTOP_MENU_REPORT.md)：1.1.1 候选包菜单中文化、新图标、刷新保护、实际截图和最新安装包散列。
 - [DESKTOP_1.1.1_REPORT.md](DESKTOP_1.1.1_REPORT.md)：1.1.1 路径补全/范围状态修复、候选包校验及未完成安装验收。
 - [DESKTOP_GUIDE.md](DESKTOP_GUIDE.md)：Windows 个人版安装、开发、打包、双数据库隔离、数据备份与排障。
 - [DESKTOP_1.1.0_REPORT.md](DESKTOP_1.1.0_REPORT.md)：1.1.0 安装向导实现、实际升级/卸载测试和未完成发布验收。

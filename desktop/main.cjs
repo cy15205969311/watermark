@@ -4,6 +4,7 @@ const path = require('node:path');
 const { loadConfiguration } = require('./config.cjs');
 const { installLogging, sanitize } = require('./logging.cjs');
 const { startBackend } = require('./backend.cjs');
+const { installMenus } = require('./menus.cjs');
 
 app.setName('DesignExtractorPersonal');
 // Stable across product display name/version changes.
@@ -57,6 +58,10 @@ else {
       event.returnValue = trusted(event) ? { apiBaseUrl: `${backend.origin}/api`, clientId: configuration.clientId, version: app.getVersion() } : {};
     });
     ipcMain.handle('desktop:logs', event => { if (trusted(event)) return shell.openPath(path.join(configuration.directory, 'logs')); });
+    let rendererBusy = false;
+    let resourceSaves = 0;
+    let browserDownloads = 0;
+    ipcMain.on('desktop:busy', (event, active) => { if (trusted(event)) rendererBusy = active === true; });
     let downloadQueue = Promise.resolve();
     ipcMain.handle('desktop:save-resource', (event, resource) => {
       if (!trusted(event)) throw new Error('不允许的保存请求');
@@ -79,13 +84,16 @@ else {
           catch (error) { clearTimeout(timer); pendingDownloads.delete(url); reject(error); }
         });
       };
-      const result = downloadQueue.then(task);
+      resourceSaves++;
+      const result = downloadQueue.then(task).finally(() => { resourceSaves--; });
       downloadQueue = result.catch(() => {});
       return result;
     });
     const pendingDownloads = new Map();
     const expiredDownloads = new Set();
     desktopSession.on('will-download', async (_event, item) => {
+      browserDownloads++;
+      item.once('done', () => { browserDownloads--; });
       const expired = [item.getURL(), ...item.getURLChain()].find(url => expiredDownloads.has(url));
       if (expired) { expiredDownloads.delete(expired); item.cancel(); return; }
       const key = [item.getURL(), ...item.getURLChain()].find(url => pendingDownloads.has(url));
@@ -103,7 +111,7 @@ else {
       } catch (error) { item.cancel(); console.error('保存文件失败', error.message); }
     });
     window = new BrowserWindow({ width: 1280, height: 860, minWidth: 900, minHeight: 650, show: false,
-      title: '去水印下载助手 · 个人版', icon: path.join(__dirname, 'assets', 'icon.ico'),
+      title: '去水印下载助手 · 个人版', icon: path.join(__dirname, 'assets', 'DesignExtractor-Personal-icon.ico'),
       webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, session: desktopSession },
     });
     window.on('query-session-end', () => app.quit());
@@ -112,11 +120,8 @@ else {
     window.webContents.on('will-navigate', (event, url) => { const target = new URL(url); if (target.origin !== backend.origin || target.pathname !== '/') { event.preventDefault(); external(url); } });
     window.webContents.on('will-attach-webview', event => event.preventDefault());
     window.webContents.on('render-process-gone', (_event, details) => { console.error('界面进程退出', details.reason); app.quit(); });
-    Menu.setApplicationMenu(Menu.buildFromTemplate([
-      { label: '应用', submenu: [{ label: '打开日志目录', click: () => shell.openPath(path.join(configuration.directory, 'logs')) }, { label: '打开用户数据目录', click: () => shell.openPath(configuration.directory) }, { type: 'separator' }, { role: 'quit', label: '退出' }] },
-      { label: '编辑', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
-      { label: '查看', submenu: [{ role: 'reload' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }] },
-    ]));
+    installMenus({ app, Menu, dialog, shell, window, directory: configuration.directory,
+      isBusy: () => rendererBusy || resourceSaves > 0 || browserDownloads > 0, isQuitting: () => quitting });
     await window.loadURL(backend.origin);
     window.show();
   }).catch(async error => {

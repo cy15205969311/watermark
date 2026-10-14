@@ -18,7 +18,8 @@
     "test:mysql": "node desktop/scripts/mysql-regression.cjs",
     "test:mysql:live": "node desktop/tests/mysql-live.cjs",
     "test:desktop:installer": "node --test desktop/tests/installer-policy.cjs",
-    "test:desktop:installer:native": "node desktop/tests/installer-native.cjs"
+    "test:desktop:installer:native": "node desktop/tests/installer-native.cjs",
+    "test:desktop:menus": "node --test desktop/tests/menu-policy.cjs"
   },
   "devDependencies": {
     "electron": "44.7.2",
