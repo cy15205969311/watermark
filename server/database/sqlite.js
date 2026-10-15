@@ -15,6 +15,8 @@ function databaseError(error) {
 function createDatabase(filename) {
   if (!path.isAbsolute(filename)) throw new Error('SQLite requires an absolute userData path');
   let db;
+  let closed = false;
+  function open() {
   try {
     const { DatabaseSync } = require('node:sqlite');
     fs.mkdirSync(path.dirname(filename), { recursive: true });
@@ -43,7 +45,9 @@ function createDatabase(filename) {
     if (/版本高于/.test(error.message)) throw error;
     throw databaseError(error);
   }
-  let closed = false;
+  closed = false;
+  }
+  open();
   return {
     async getConnection() { if (closed) throw new Error('Database closed'); return { release() {} }; },
     async query(sql, values = []) {
@@ -56,6 +60,16 @@ function createDatabase(filename) {
     },
     async end() {
       if (!closed) { db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); db.close(); closed = true; }
+    },
+    reopen() { if (closed) open(); },
+    snapshot(target) {
+      if (closed || fs.existsSync(target)) throw new Error('数据库快照目标不可用');
+      // VACUUM INTO creates a consistent standalone database including WAL data.
+      db.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
+    },
+    status() {
+      if (closed) return { ready: false };
+      return { ready: true, schemaVersion: db.prepare('PRAGMA user_version').get().user_version };
     },
   };
 }

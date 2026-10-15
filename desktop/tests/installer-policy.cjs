@@ -56,7 +56,22 @@ test('native uninstaller generated and vendor version pinned', () => {
   const generated = fs.readFileSync(path.join(root, '.desktop-build/nsis/installer-helpers.nsh'), 'utf8');
   assert.match(generated, /WriteUninstaller "\$INSTDIR\\\$\{UNINSTALL_FILENAME\}"/);
   assert.doesNotMatch(generated, /File "\/oname=\$\{UNINSTALL_FILENAME\}"/);
-  assert.match(installer, /!include "uninstaller.nsh"/);
+  assert.match(installer, /!include "\$\{PROJECT_DIR\}\\.desktop-build\\nsis\\uninstaller.nsh"/);
+  const uninstaller = fs.readFileSync(path.join(root, '.desktop-build/nsis/uninstaller.nsh'), 'utf8');
+  assert.match(uninstaller, /StrCmp \$R2 "Downloads" continue/);
+  assert.match(uninstaller, /StrCmp \$R2 "personal" continue/);
+  assert.match(uninstaller, /Call un.RemoveProgramFilesKeepingDownloads/);
+  assert.doesNotMatch(uninstaller, /RMDir \/r \$INSTDIR/);
+});
+
+test('personal permissions are scoped, persisted and provisioned before launch; old unsafe uninstallers block', () => {
+  assert.match(wizard, /Call ProvisionPersonalStorage[\s\S]*WriteINIStr "\$INSTDIR\\storage-layout.ini" "storage" "scope" "\$installScope"/);
+  assert.match(installer, /Call PreparePersonalStorage[\s\S]*installSection.nsh/);
+  assert.match(wizard, /旧卸载程序尚未登记保留 personal/);
+  const script = fs.readFileSync(path.join(root, 'desktop/installer/storage-permissions.ps1'), 'utf8');
+  assert.match(script, /ReadAndExecute,CreateDirectories/);
+  assert.match(script, /SetAccessRuleProtection\(\$true, \$false\)/);
+  assert.doesNotMatch(script, /Remove-Item|\/T|AllDirectories/);
 });
 test('third-party licenses included without credentials or user data', () => {
   const directory = path.join(root, '.desktop-build/notices');

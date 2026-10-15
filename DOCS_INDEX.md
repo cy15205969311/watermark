@@ -7,12 +7,11 @@
 - [PROJECT_ARCHITECTURE.md](PROJECT_ARCHITECTURE.md)：当前仓库的真实目录结构、模块职责、浏览器服务与提取链路分层说明，适合新成员快速建立代码认知。
 
 ### 桌面应用
-- [DESKTOP_MENU_REPORT.md](DESKTOP_MENU_REPORT.md)：1.1.1 候选包菜单中文化、新图标、刷新保护、实际截图和最新安装包散列。
-- [DESKTOP_1.1.1_REPORT.md](DESKTOP_1.1.1_REPORT.md)：1.1.1 路径补全/范围状态修复、候选包校验及未完成安装验收。
-- [DESKTOP_GUIDE.md](DESKTOP_GUIDE.md)：Windows 个人版安装、开发、打包、双数据库隔离、数据备份与排障。
-- [DESKTOP_1.1.0_REPORT.md](DESKTOP_1.1.0_REPORT.md)：1.1.0 安装向导实现、实际升级/卸载测试和未完成发布验收。
-- [DESKTOP_DELIVERY_REPORT.md](DESKTOP_DELIVERY_REPORT.md)：实际安装包信息、阶段修改、测试证据及发布前未完成验收。
-- [DESKTOP_IMPLEMENTATION_PLAN.md](DESKTOP_IMPLEMENTATION_PLAN.md)：桌面改造前的结构分析与最小方案。
+- [DESKTOP_1.2.0_STORAGE_REPORT.md](DESKTOP_1.2.0_STORAGE_REPORT.md)：安装目录 personal、SID 隔离、安全迁移、Bug 反馈与本轮候选包验收。
+- [DESKTOP_1.2.0_REPORT.md](DESKTOP_1.2.0_REPORT.md)：1.2.0 未签名候选、构建测试与真实安装待验收项。
+- [DESKTOP_1.2.0_BACKUP_TESTS.md](DESKTOP_1.2.0_BACKUP_TESTS.md)：备份一致性、恢复回滚、取消及诊断专项。
+- [DESKTOP_1.2.0_DOWNLOADS_REPORT.md](DESKTOP_1.2.0_DOWNLOADS_REPORT.md)：历史迭代的 Downloads 测试；其 AppData 回退策略已被本轮 personal 存储改造替代。
+- [DESKTOP_GUIDE.md](DESKTOP_GUIDE.md)：Windows 个人版安装、开发、打包、双数据库隔离、数据备份与排障指南。
 
 ### 平台提取逻辑
 - [PLATFORM_EXTRACTION_LOGIC_FOR_PYTHON.md](PLATFORM_EXTRACTION_LOGIC_FOR_PYTHON.md)：图怪兽 / 创客贴 / 稿定设计 / 花瓣网四个平台提取链路的总览文档，重点覆盖真实调用链、候选图筛选、多页识别、结果归一化和 Python 迁移建议。

@@ -7,6 +7,9 @@ const net = require('node:net');
 const http = require('node:http');
 const Module = require('node:module');
 const root = path.resolve(__dirname, '../..');
+const directory = fs.mkdtempSync(path.join(root, '.desktop-build', 'desktop-core-test-'));
+const { createPaths, initializePaths } = require('../paths.cjs');
+const testPaths = createPaths({ app, developmentRoot: directory }); initializePaths(app, testPaths);
 const { createDatabase, databaseError } = require('../../server/database/sqlite');
 const { loadConfiguration } = require('../config.cjs');
 const { sanitize, installLogging } = require('../logging.cjs');
@@ -20,8 +23,7 @@ async function check(name, fn) {
   catch (error) { results.push({ name, passed: false, error: error.message }); console.error(`FAIL ${name}`, error.stack); }
 }
 app.whenReady().then(async () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), '设计助手 desktop test '));
-  const config = loadConfiguration(directory);
+  const config = loadConfiguration(directory, testPaths);
   await check('Electron built-in SQLite and Sharp N-API load', async () => {
     assert.ok(require('node:sqlite').DatabaseSync);
     const sharp = require('../../server/node_modules/sharp');
@@ -87,6 +89,23 @@ app.whenReady().then(async () => {
     });
   } finally { Module._load = originalLoad; }
   if (backend) {
+    await check('Site-triggered Chromium attachments stay in managed personal temp, preserve bytes and leave Windows Downloads alone', async () => {
+      const bytes = Buffer.from('GIF89a-managed-attachment');
+      const fixture = http.createServer((_req, res) => { res.writeHead(200, { 'Content-Type': 'image/gif', 'Content-Disposition': 'attachment; filename="managed-browser.gif"' }); res.end(bytes); });
+      await new Promise(resolve => fixture.listen(0, '127.0.0.1', resolve));
+      const pool = require('../../server/services/browser-pool').getDefaultPool(); const browser = await pool.acquire(); let page;
+      try {
+        page = await browser.newPage();
+        await page.goto(`http://127.0.0.1:${fixture.address().port}/attachment`).catch(error => { if (!/ERR_ABORTED/.test(error.message)) throw error; });
+        const file = path.join(config.browserDownloadDirectory, 'managed-browser.gif');
+        const deadline = Date.now() + 5000;
+        while ((!fs.existsSync(file) || fs.statSync(file).size !== bytes.length) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
+        assert.deepEqual(fs.readFileSync(file), bytes);
+      } finally {
+        await page?.close(); pool.release(browser);
+        await new Promise(resolve => { fixture.close(resolve); fixture.closeAllConnections(); });
+      }
+    });
     const call = async (route, { method = 'GET', body, headers = {} } = {}) => {
       const response = await fetch(`${backend.origin}${route}`, { method, headers: { 'x-desktop-session': backend.token, 'x-client-id': config.clientId, ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, ...(body ? { body: JSON.stringify(body) } : {}) });
       return { status: response.status, data: await response.json() };
@@ -100,6 +119,17 @@ app.whenReady().then(async () => {
         assert.ok([401, 403].includes(status));
       }
       assert.equal((await call('/api/health')).data.database, 'sqlite');
+    });
+    await check('Maintenance rejects new writes then resumes the same SQLite connection and history', async () => {
+      backend.pause();
+      try {
+        assert.equal((await call('/api/history')).status, 503);
+        assert.equal((await call('/api/parse', { method: 'POST', body: { url: 'https://gaoding.com/must-not-write' } })).status, 503);
+        assert.throws(() => backend.pause(), /任务正在进行/);
+        assert.equal(backend.status().database.ready, true);
+      } finally { backend.resume(); }
+      assert.equal((await call('/api/history')).data.data.length, 0);
+      assert.equal((await call('/api/health')).status, 200);
     });
     await check('SQLite API preserves ordered pages, shared URLs, partial/unknown and GIF metadata', async () => {
       for (const status of ['complete', 'partial', 'unknown']) {
@@ -153,7 +183,7 @@ app.whenReady().then(async () => {
       const pids = browsers.map(browser => browser.process().pid);
       for (const browser of browsers) {
         const profileArgument = browser.process().spawnargs.find(arg => arg.includes('--user-data-dir='));
-        assert.ok(profileArgument?.replace(/"/g, '').startsWith('--user-data-dir=' + config.temporaryDirectory), profileArgument);
+        assert.ok(profileArgument?.replace(/"/g, '').startsWith('--user-data-dir=' + config.browserProfileDirectory), profileArgument);
       }
       const start = Date.now(); await backend.stop(); assert.ok(Date.now() - start < 16000);
       assert.equal(await waiting, true);

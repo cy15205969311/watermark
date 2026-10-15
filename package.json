@@ -1,7 +1,7 @@
 {
   "name": "watermark-desktop-build",
   "private": true,
-  "version": "1.1.1",
+  "version": "1.2.0",
   "engines": {
     "node": ">=22.13.0"
   },
@@ -10,16 +10,25 @@
     "desktop:prepare": "node desktop/scripts/prepare.cjs",
     "desktop:dev": "npm run desktop:prepare && electron desktop/main.cjs",
     "desktop:dir": "npm run desktop:prepare && electron-builder --config desktop/builder.cjs --win --x64 --dir",
-    "desktop:dist": "npm run desktop:prepare && electron-builder --config desktop/builder.cjs --win nsis --x64",
+    "desktop:dist": "node desktop/scripts/dist.cjs candidate",
+    "desktop:dist:release": "node desktop/scripts/dist.cjs release",
+    "desktop:verify:signatures": "node desktop/scripts/verify-signatures.cjs",
+    "desktop:audit:signing": "node desktop/scripts/signing-audit.cjs",
+    "test:desktop:signing": "node --test desktop/tests/unsigned-policy.cjs desktop/tests/signing-native.cjs",
     "test:desktop": "electron desktop/tests/run.cjs",
     "test:desktop:main": "node desktop/scripts/main-smoke.cjs",
-    "test:desktop:package": "node desktop/tests/package-inspect.cjs && node desktop/tests/packaged.cjs",
+    "test:desktop:package": "node desktop/scripts/package-smoke.cjs",
     "test:desktop:nsis": "powershell -NoProfile -ExecutionPolicy Bypass -File desktop/tests/nsis.ps1",
     "test:mysql": "node desktop/scripts/mysql-regression.cjs",
     "test:mysql:live": "node desktop/tests/mysql-live.cjs",
     "test:desktop:installer": "node --test desktop/tests/installer-policy.cjs",
     "test:desktop:installer:native": "node desktop/tests/installer-native.cjs",
-    "test:desktop:menus": "node --test desktop/tests/menu-policy.cjs"
+    "test:desktop:menus": "node --test desktop/tests/menu-policy.cjs",
+    "test:desktop:data": "electron desktop/tests/personal-data.cjs",
+    "test:desktop:settings": "node desktop/scripts/settings-smoke.cjs",
+    "test:desktop:storage": "node --test desktop/tests/storage.cjs",
+    "test:desktop:downloads": "node --test desktop/tests/download-directory.cjs",
+    "test:desktop:downloads:native": "node desktop/tests/download-retention-native.cjs"
   },
   "devDependencies": {
     "electron": "44.7.2",

@@ -15,6 +15,14 @@ function prepareNsisTemplates(root) {
   }
   transform('installSection.nsh', 'installSection.nsh', '!include installer.nsh', '!include "${PROJECT_DIR}\\.desktop-build\\nsis\\installer-helpers.nsh"');
   transform('include/installer.nsh', 'installer-helpers.nsh', 'File "/oname=${UNINSTALL_FILENAME}" "${UNINSTALLER_OUT_FILE}"', 'WriteUninstaller "$INSTDIR\\${UNINSTALL_FILENAME}"');
+  // Downloads now contains user-owned files. Keep it in place during both
+  // atomic upgrade staging and normal removal; keep vendor rollback logic.
+  let uninstaller = fs.readFileSync(path.join(templates, 'uninstaller.nsh'), 'utf8');
+  const skip = '    StrCmp $R2 ".." continue';
+  if (uninstaller.split(skip).length !== 3 || uninstaller.split('    RMDir /r $INSTDIR').length !== 2) throw new Error('NSIS uninstaller template changed');
+  uninstaller = uninstaller.replace(skip, skip + '\n    ${If} $R0 == ""\n      StrCmp $R2 "Downloads" continue\n      StrCmp $R2 "personal" continue\n      StrCmp $R2 "storage-layout.ini" continue\n    ${EndIf}');
+  uninstaller = uninstaller.replace('    RMDir /r $INSTDIR', '    Call un.RemoveProgramFilesKeepingDownloads');
+  fs.writeFileSync(path.join(directory, 'uninstaller.nsh'), uninstaller);
   const running = fs.readFileSync(path.join(templates, 'include/allowOnlyOneInstallerInstance.nsh'), 'utf8');
   fs.writeFileSync(path.join(directory, 'allowOnlyOneInstallerInstance.nsh'), running.replace(/Var \/GLOBAL (\w+)([^\r\n]*)/g, (_, name, comment) => `!ifndef PERSONAL_VAR_${name}\n!define PERSONAL_VAR_${name}\nVar /GLOBAL ${name}${comment}\n!endif`));
 }

@@ -18,6 +18,19 @@ async function run() {
     try { await db.query('INSERT INTO parse_records (original_url, client_id, pages_json, page_count) VALUES (?, ?, ?, ?)', ['https://example.com/nsis-retention-fixture', state.clientId, JSON.stringify([{ page: 1 }, { page: 2 }, { page: 3 }]), 3]); }
     finally { await db.end(); }
     fs.writeFileSync(filename, JSON.stringify(state, null, 2));
+  } else if (mode === 'migrate') {
+    const state = JSON.parse(fs.readFileSync(filename));
+    const target = path.resolve(process.argv[4] || '');
+    if (!target.startsWith(root + path.sep)) throw new Error('Migration test target must be disposable build directory');
+    const { createPaths, initializePaths } = require('../paths.cjs');
+    const { migrateData } = require('../storage-migration.cjs');
+    const app = { isPackaged: true, setPath() {}, commandLine: { appendSwitch() {} } };
+    const paths = createPaths({ app, execPath: path.join(target, '去水印下载助手.exe') });
+    initializePaths(app, paths);
+    if (!fs.existsSync(paths.configPath)) await migrateData({ source: state.directory, paths });
+    state.directory = paths.dataDirectory; state.databasePath = paths.databasePath;
+    state.marker = path.join(state.directory, 'uploads', `${state.clientId}.txt`);
+    fs.writeFileSync(filename, JSON.stringify(state, null, 2));
   } else {
     const state = JSON.parse(fs.readFileSync(filename));
     assert.equal(fs.readFileSync(path.join(state.directory, 'config.json'), 'utf8'), state.config);

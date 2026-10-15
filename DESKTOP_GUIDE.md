@@ -4,23 +4,25 @@
 
 ## 普通用户
 
-运行候选包 `release/DesignExtractor-Personal-1.1.1-x64-Setup.exe`。产品显示名称为“去水印下载助手”。安装器配置为简体中文向导：欢迎、接受安装使用说明、安装范围、安装目录、快捷方式、安装进度、完成。默认仅为当前用户安装，开始菜单快捷方式默认开启，桌面快捷方式可选；完成页可选择立即启动。新版向导实际页面尚待人工验收，不能将配置检查当作界面验收通过。关闭窗口即退出应用，不隐藏到托盘。首次启动会初始化数据库并预热随包浏览器，后端健康检查成功后才显示操作界面。
+当前 1.2.0 未签名候选由 `release/latest-candidate.json` 指向独立构建目录；本轮存储改造的包路径、SHA-256 和测试限制见 [存储与反馈报告](DESKTOP_1.2.0_STORAGE_REPORT.md)。状态为 unsigned_candidate / NotSigned，正式签名未启用，不接入付费或云签名，不承诺 SmartScreen 无警告。
 
-1.1.1 未签名，按用户选择先交付候选包，本轮不执行真实安装、升级、卸载。目录规范化与范围冲突已通过编译后的原生 NSIS 测试；真实向导截图、UAC、两种范围安装、多账户隔离及干净 Windows 10/11 均未验收。详见 [1.1.1 候选包报告](DESKTOP_1.1.1_REPORT.md)。1.1.0 的开发机安装记录仅作为旧版基线，不代替新版验收。
+运行候选目录中的 `DesignExtractor-Personal-1.2.0-x64-Setup.exe`。产品显示名称为“去水印下载助手”。安装器配置为简体中文向导：欢迎、接受安装使用说明、安装范围、安装目录、快捷方式、安装进度、完成。默认仅为当前用户安装，开始菜单快捷方式默认开启，桌面快捷方式可选；完成页可选择立即启动。新版向导实际页面尚待人工验收，不能将配置检查当作界面验收通过。关闭窗口即退出应用，不隐藏到托盘。首次启动会初始化数据库并预热随包浏览器，后端健康检查成功后才显示操作界面。
+
+用户确认无可恢复虚拟机或专用账户，因此本轮不执行真实安装、升级、卸载。目录规范化与范围冲突通过了原生 NSIS 函数测试；真实向导、UAC、两种范围安装、多账户隔离及干净 Windows 10/11 均未验收。旧版开发机记录不能代替 1.2.0 验收。
 
 当前用户默认目录为 `%LOCALAPPDATA%/Programs/DesignExtractor Personal`；所有用户默认目录为 `%ProgramFiles%/DesignExtractor Personal`，必要时由 Windows 请求管理员权限。升级默认沿用同范围已登记目录。切换范围时默认目录同步，自定义目录保留并重新校验。目录页显示最终目录预览：输入 `E:\` 会补全为 `E:\DesignExtractor Personal`；输入 `D:\Applications\` 表示父目录并追加产品文件夹；手输完整自定义目录（不以反斜杠结尾）保持原意。浏览选择磁盘或上级目录时自动追加产品文件夹，已选择产品目录则不重复追加（大小写不敏感）；取消浏览保留输入。“恢复默认目录”使用当前范围。安装目录必须是专用空目录或本应用原安装目录，不支持磁盘根目录作为最终位置、相对路径、网络路径及不存在的盘符。
 
-已有安装请选择相同范围升级。跨范围覆盖会提示并停止，不会静默卸载旧版；如需转换范围，请先冷备份个人数据，再卸载原程序并重新安装。所有用户安装只共享程序文件，每个账户仍使用自己的 `%APPDATA%/DesignExtractorPersonal/personal` 数据。
+已有安装请选择相同范围升级。跨范围覆盖会提示并停止，不会静默卸载旧版；如需转换范围，请先冷备份个人数据，再卸载原程序并重新安装。所有用户安装只共享程序文件，每个账户使用 `<安装目录>/personal/users/<Windows SID>`；当前用户安装使用 `<安装目录>/personal`。不回退 AppData。
 
 卸载只删除程序及所属范围的快捷方式，保留个人数据。本版采用安全保留方案，不提供自动删除个人数据的复选框，也拒绝 `--delete-app-data` 参数。安装使用说明与 MIT、第三方开源许可分开；许可清单位于安装目录 `resources/licenses`，发布前需审阅版权归属及说明文本。
 
 ## 桌面菜单与图标
 
-当前 1.1.1 候选包合入菜单体验修复，版本号未变。顶部为“应用 / 编辑 / 查看 / 帮助”：应用可打开日志文件夹、个人数据文件夹或退出；编辑保留 Ctrl+Z/Y/X/C/V/A；查看提供刷新、恢复默认缩放、放大、缩小；帮助复用现有使用教程，并提供日志和真实版本信息。
+当前版本为 1.2.0。顶部为“应用 / 编辑 / 查看 / 帮助”：应用可打开日志文件夹、个人数据文件夹、设置与数据管理、导出诊断信息或退出；编辑保留 Ctrl+Z/Y/X/C/V/A；查看提供刷新、恢复默认缩放、放大、缩小；帮助复用现有使用教程，并提供日志、真实版本信息和“问题反馈 / 报告 Bug”。反馈邮箱为 ad4928115@gmail.com，先预览脱敏模板再选择打开系统邮件草稿或复制内容，不自动发送；邮件客户端失败时可复制模板手动发送。
 
 输入框右键使用中文编辑操作，按 Chromium 的编辑状态启用；已选普通文本只提供复制，图片和空白区域不添加未实现的命令。解析、上传、批量删除或下载期间刷新会先提示，默认取消刷新。若主动选择“仍然刷新”，当前界面尚未保存的状态可能丢失，后台任务不保证随刷新取消。F5 等刷新路径也受 beforeunload 保护；退出菜单沿用正常资源清理。
 
-窗口、应用 EXE、安装器和卸载器配置统一引用 `desktop/assets/DesignExtractor-Personal-icon.ico`。构建不再从旧 SVG 重生成图标。EXE/安装包的 7 个 ICO 图像资源已做二进制比对；已安装快捷方式与卸载器的视觉效果仍需专用环境验收。菜单实际截图、测试结果与新散列见 [菜单与图标报告](DESKTOP_MENU_REPORT.md)。本轮未增加设置中心或更新服务。
+窗口、应用 EXE、安装器和卸载器配置统一引用 `desktop/assets/DesignExtractor-Personal-icon.ico`。构建不再从旧 SVG 重生成图标。EXE/安装包的 7 个 ICO 图像资源已做二进制比对；已安装快捷方式与卸载器的视觉效果仍需专用环境验收。设置也可通过 Ctrl+, 或主界面入口打开。本轮增加设置中心，未增加更新服务。实际卸载器图标与快捷方式视觉验收仍需专用环境。
 
 ## 服务器版保持原启动方式
 
@@ -48,6 +50,12 @@ npm run test:mysql:live
 npm run test:desktop
 npm run test:desktop:main
 npm run test:desktop:menus
+npm run test:desktop:data
+npm run test:desktop:settings
+npm run test:desktop:storage
+npm run test:desktop:downloads
+npm run test:desktop:downloads:native
+npm run test:desktop:signing
 npm run desktop:dev
 ```
 
@@ -56,7 +64,9 @@ npm run desktop:dev
 ```powershell
 npm run desktop:dir
 npm run desktop:dist
+npm run desktop:verify:signatures
 npm run test:desktop:package
+npm run test:desktop:package -- --production-copy
 npm run test:desktop:installer
 npm run test:desktop:installer:native
 # 仅在可恢复虚拟机或专用测试账户，以下会真实安装/升级/卸载：
@@ -65,13 +75,13 @@ npm run test:desktop:nsis -- -DisposableEnvironment -LiveGaoding
 npm run test:desktop:nsis -- -DisposableEnvironment -AllUsers
 ```
 
-`test:desktop:installer:native` 编译生产使用的相同 NSIS 路径/范围函数，只写隔离报告，不安装、不提权、不写登记。`test:desktop:package` 仅在构建目录副本加入测试启动器并关闭该副本的 ASAR 完整性校验，以隔离 appData；发布包保持原样，该冒烟不代替原包安装验收。
+`test:desktop:installer:native` 编译生产使用的相同 NSIS 路径/范围函数，只写隔离报告，不安装、不提权、不写登记。`test:desktop:package` 仅在构建目录副本加入测试启动器并关闭该副本的 ASAR 完整性校验，以隔离 appData；发布包保持原样。另可使用 --production-copy 启动 EXE/ASAR 与完整性开关均未修改的隔离副本，只预置独立 personal 初始化标记防止触发日常旧数据迁移；会校验运行前后文件哈希。两种冒烟均不代替真实安装/UAC/原生对话框验收。
 
 `test:desktop:nsis` 会实际安装到 `.desktop-build/NSIS 旧版/新版 中文 Path ...`，运行安装后的程序，测试 1.0.0 到当前版本、目录变更、范围冲突、同版本覆盖、快捷方式、卸载及用户数据保留。必须显式指定 `-DisposableEnvironment`，否则启动前停止；不要在日常账户运行。全用户模式测试新装与覆盖，不声称旧版支持全用户安装。测试遇到已有登记的安装会停止；只创建并清理自己的 SQLite 夹具和上传标记，不访问 MySQL。保留的 1.0.0 EXE 是跨版本测试必需文件。联网稿定测试依赖分享链接仍公开可访问。不要在提取任务运行时测试安装/卸载。自动化使用 `/S`，另需验证真实向导界面及 UAC 同意/拒绝。
 
 `test:mysql` 使用现有回归脚本及隔离数据库 mock；`test:mysql:live` 读取服务器配置，只执行 SELECT/SHOW，不运行迁移或修改历史。真实服务器 `npm start` 仍会按旧逻辑检查所需列。
 
-构建产物位于 `release/`；暂存依赖、浏览器和前端位于 `.desktop-build/`。桌面前端构建输出到 `.desktop-build/client-dist`，不覆盖服务器的 `client/dist`，不修改任何 env 或数据库文件。
+候选位于 `release/candidates/1.2.0/<时间与随机标识>/`，成功后更新 `release/latest-candidate.json`，包含 EXE、SHA-256、版本元数据、第三方文件校验、实际验签报告与日志。`desktop:dist:release` 明确报错正式签名未启用，原生卸载器恢复单遍编译，无 signer/双遍签名适配器。暂存依赖、浏览器和前端位于 `.desktop-build/`。桌面前端构建输出到 `.desktop-build/client-dist`，不覆盖服务器的 `client/dist`，不修改任何 env 或数据库文件。
 
 Electron 44 在首次使用时下载二进制，Puppeteer 下载或复用其版本匹配的构建缓存。网络无法访问 GitHub 时，可在开发终端显式设置镜像后重试（不关闭 TLS）：
 
@@ -86,7 +96,7 @@ npm run desktop:dist
 
 ## 数据目录、备份与恢复
 
-默认数据目录：`%APPDATA%/DesignExtractorPersonal/`，稳定应用标识为 `com.designextractor.personal`。其中：
+默认数据目录：当前用户安装为 `<path.dirname(process.execPath)>/personal`；所有用户安装为该目录下 `users/<Windows SID>`，由安装器登记的 storage-layout.ini 决定范围。开发模式使用 `.desktop-build/development/personal`，可通过仅开发模式有效的 DESIGN_EXTRACTOR_DEV_DATA_DIR 隔离测试。稳定应用标识仍为 `com.designextractor.personal`，数据库结构版本仍为 1。以下结构相对于实际个人数据根目录：
 
 ```text
 personal/
@@ -94,20 +104,47 @@ personal/
   history.sqlite    SQLite 历史数据库
   uploads/          本地上传及处理后的图片
   logs/desktop.log  脱敏日志，2 MiB 轮转，保留 3 份旧日志
-  temp/             Chromium 独立临时配置目录
+  Downloads/        默认下载（用户自定义位置继续优先）
+  browser-profiles/ 独立 Chromium 临时用户配置，退出清理
+  cache/session/    Electron 持久会话；其他缓存也位于 cache
+  temp/             应用临时文件与恢复暂存
+  backups/rollback/ 恢复前的回滚备份
+  .storage-layout.json  已初始化/迁移标记（不要手工删除）
 ```
 
 正常退出会完成有限的任务等待、关闭浏览器、清理临时配置目录、关闭 HTTP 服务和 SQLite，并执行 WAL checkpoint。SQLite 使用 WAL、外键、5 秒 busy timeout、独立 `user_version` 迁移和历史索引；每条写入由 SQLite 原子事务提交，迁移使用显式事务。
 
-冷备份步骤：退出应用并确认其进程已结束，复制整个 `personal` 目录到备份位置。必须同时保留 `config.json` 和 `uploads`；仅恢复数据库而丢失历史身份配置会导致列表看不到原记录。异常退出后若存在 `history.sqlite-wal`/`-shm`，也要一起备份，优先先重新启动并正常退出再备份。
+手工冷备份（无法启动时备用）：退出应用并确认其进程已结束，复制整个 `personal` 目录到备份位置。必须同时保留 `config.json` 和 `uploads`；仅恢复数据库而丢失历史身份配置会导致列表看不到原记录。异常退出后若存在 `history.sqlite-wal`/`-shm`，也要一起备份，优先先重新启动并正常退出再备份。
 
-恢复步骤：退出应用，先另存当前 `personal` 目录，再将选定备份恢复到相同位置后启动。恢复会替换当前本地历史，应由用户明确选择备份执行。应用没有自动清空、导入 MySQL 或删除用户数据的功能。普通升级和卸载默认保留用户数据；卸载不等于清除历史。
+手工冷恢复（无法启动时备用）：退出应用，先另存当前 `personal` 目录，再将选定备份恢复到相同位置后启动。恢复会替换当前本地历史，应由用户明确选择备份执行。应用没有自动清空、导入 MySQL 或删除用户数据的功能。普通升级和卸载默认保留用户数据；卸载不等于清除历史。
+
+## 设置中心使用方式
+
+从“应用 → 设置与数据管理”、Ctrl+, 或主界面入口打开。真实显示版本、当前用户目录、浏览器路径/版本/池状态及 SQLite 状态。不允许指定任意 Chrome 路径。
+
+下载位置：默认使用实际个人数据根目录下的 `Downloads`。首次下载创建并执行真实写入探测、空间检查。用户已保存的自定义路径优先使用，重启不重置；“恢复默认”清除自定义覆盖，重新采用当前个人数据目录。取消保存不写文件；已有文件需确认替换。GIF 原始字节、多页顺序与单次另选位置行为保持不变。
+
+安装器只为所有用户安装的 `personal` 与 `personal/users` 容器设置最小范围权限，程序和 resources 不开放写入；运行时按 SID 建立私有数据目录。不可写或无法隔离时明确停止，指导修复权限或使用可写安装位置，不回退 AppData、不以管理员身份运行整个应用。下载自定义目录失效时保留原设置并提示，用户仍可在保存对话框主动另选位置。Windows/系统组件仍可能在 C 盘写临时数据，本改造不保证系统零写入。
+
+首次启动检测旧 `%APPDATA%/DesignExtractorPersonal/personal` 与登记的上次安装目录，显示来源和目标供确认。先校验空间、配置与路径，再用 SQLite 在线备份取得含 WAL 已提交事务的一致快照，复制并校验上传、日志、受管理的下载和备份文件。来源发生变化、缺失引用、同名不同内容或未识别文件时拒绝迁移。新目录已有数据时必须明确使用当前数据，禁止合并覆盖。迁移提交有日志，中断时撤回到本次暂存目录；旧目录始终保留。浏览器缓存/临时配置重新初始化，不复制旧锁文件。外部自定义下载目录不移动，不扫描整个 Windows 下载目录。
+
+修改安装位置时使用安装器登记的 previousInstall 发现旧数据；手工移动程序且未保留来源登记时，应先冷备份 personal，再放到新安装位置，不能凭空定位任意旧盘符。完成迁移后不要继续使用旧版本写入旧数据。两份数据不会自动同步。
+
+新版升级、卸载都跳过整个 `personal`（同时保留旧 `Downloads`）。旧卸载器若没有 personal-v1 保留能力且已有 personal 数据，升级会阻止并要求先在安装目录外完整备份，再人工处理旧安装。卸载不会清空历史，不提供自动删除 personal 功能；卸载时保留 storage-layout.ini，凭应用 ID、存储版本及安装范围识别仅含 personal/Downloads 的专属目录，允许同范围重装；混有其他文件或范围不同则拒绝。真实安装/UAC/多账户未验收，勿将候选包当作已完成发布验收。
+
+推荐备份：完成提取/上传/下载 → “立即备份” → 选择存放文件夹。生成唯一的 .dexp-backup 目录，含 config.json、独立一致的 SQLite 快照、uploads、manifest.json；不含日志、缓存或浏览器。请保留整个目录，不编辑清单。备份不加密，可能含私人图片、历史链接和身份配置，不要上传到公开位置。
+
+恢复：“选择备份并恢复” → 选择 .dexp-backup 文件夹 → 核对时间、历史和上传数量 → 确认。格式、版本、散列、数据库、上传引用均验证后，自动先备份当前状态到当前个人数据目录的 backups/rollback，再替换当前配置（含历史身份和下载目录）、数据库和 uploads。日志及旧备份保留，完成后界面重载。损坏、缺文件及高版本备份拒绝；取消选择/确认不改数据。失败尽力回滚，中断后下次启动优先处理恢复日志，不删除整个用户目录。
+
+撤回恢复：按相同流程选择 backups/rollback 中对应的恢复前备份。回滚备份不自动删除。执行中请耐心等待，不强制结束进程；较大上传目录复制/校验期间可能暂时阻塞主进程。专项证据见 [备份恢复报告](DESKTOP_1.2.0_BACKUP_TESTS.md)。
+
+诊断：设置或应用菜单 → “导出诊断信息” → 确认包含范围 → 选择新文件名。仅本地保存白名单 JSON，不含原始日志、图片、历史 URL 或凭据，不上传。记录限本次运行，故障排查可能还需要本机日志；不要公开含私人信息的文件。
 
 ## 生命周期与安全
 
 主进程显式配置 SQLite，完全跳过服务器 env 加载和 MySQL 初始化。SQLite 失败直接报告错误，不回退其他数据库。Express 绑定 `127.0.0.1` 的自动端口，窗口通过 preload 获取实际 API 地址和稳定 clientId。会话凭证只由主进程注入匹配本地来源的 API/上传请求，渲染进程不能读取该凭证；Host、Origin 和凭证均受校验。
 
-窗口启用 sandbox/contextIsolation/webSecurity，禁用 Node 集成。preload 只提供连接信息、日志目录和经过校验的资源保存操作，不暴露任意文件系统或进程执行。外部官方分享链接使用系统浏览器打开，主窗口不能导航到远程页面或上传文档。保存图片/GIF 按原始字节写入用户选择的位置，不做格式转换；多页逐页保存，用户取消即停止后续保存。
+窗口启用 sandbox/contextIsolation/webSecurity，禁用 Node 集成。preload 只提供受控连接信息、目录/设置、备份恢复、诊断和经过校验的资源保存操作，不暴露任意文件系统或进程执行。外部官方分享链接使用系统浏览器打开，主窗口不能导航到远程页面或上传文档。保存图片/GIF 按原始字节写入用户选择的位置，不做格式转换；多页逐页保存，用户取消即停止后续保存。
 
 退出先拒绝新 API 任务，最多等待 8 秒处理请求，再关闭所有追踪到的 Puppeteer 浏览器及连接池、HTTP 和数据库。浏览器启动有 10 秒上限，关闭有进程树清理兜底；应用整体有 30 秒退出上限。Windows 强制结束进程不能保证运行清理回调，SQLite WAL 用于保护已经提交的事务。未加入自动更新器，升级通过新安装包执行。
 
@@ -131,7 +168,7 @@ personal/
 - 在中文/空格路径安装，验证开始菜单、桌面快捷方式、非管理员用户和磁盘/权限错误提示。
 - 以两个实际不同版本验证升级、历史保留和卸载；测试操作系统关机和强制终止后的恢复。
 - 用仍可访问的图怪兽 GIF、稿定单页/多页、创客贴链接重复联网验收；夹具成功不能代替平台实时访问成功。
-- 配置代码签名后验证签名及安装体验。普通 NSIS 不代表满足应用商店要求。
+- 本阶段不启用付费签名；未来若重新安排，需独立设计验收。普通 NSIS 不代表满足应用商店要求。
 
 测试产物和截图保存在 `server/test-artifacts/`，已从 Git 与安装包排除。
 

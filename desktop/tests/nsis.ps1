@@ -1,4 +1,4 @@
-﻿param([switch]$LiveGaoding, [switch]$AllUsers, [switch]$DisposableEnvironment)
+﻿param([switch]$LiveGaoding, [switch]$AllUsers, [switch]$DisposableEnvironment, [string]$ArtifactDirectory)
 $ErrorActionPreference = 'Stop'
 if (-not $DisposableEnvironment) { throw 'Real install/upgrade/uninstall tests require an explicitly disposable VM or dedicated test account. Pass -DisposableEnvironment only there. Use test:desktop:installer:native for no-install checks.' }
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
@@ -10,7 +10,21 @@ foreach ($target in @($oldTarget, $newTarget)) {
   if (-not $target.StartsWith($buildRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid NSIS test target' }
 }
 $version = (Get-Content -LiteralPath (Join-Path $projectRoot 'package.json') -Raw | ConvertFrom-Json).version
-$installer = Join-Path $projectRoot "release/DesignExtractor-Personal-$version-x64-Setup.exe"
+if (-not $ArtifactDirectory) {
+  $pointer = Join-Path $projectRoot 'release/latest-candidate.json'
+  if (Test-Path -LiteralPath $pointer) { $ArtifactDirectory = Join-Path $projectRoot ((Get-Content -LiteralPath $pointer -Raw | ConvertFrom-Json).directory) }
+  else { $ArtifactDirectory = Join-Path $projectRoot 'release' }
+}
+$ArtifactDirectory = [IO.Path]::GetFullPath($ArtifactDirectory)
+$installer = Join-Path $ArtifactDirectory "DesignExtractor-Personal-$version-x64-Setup.exe"
+$metadataFile = Join-Path $ArtifactDirectory 'release-metadata.json'
+if (Test-Path -LiteralPath $metadataFile) {
+  $record = Get-Content -LiteralPath $metadataFile -Raw | ConvertFrom-Json
+  $verifyArgs = @((Join-Path $projectRoot 'desktop/scripts/verify-signatures.cjs'), "--output=$ArtifactDirectory")
+  if ($record.state -ne 'unsigned_candidate') { throw 'Current install test accepts unsigned candidates only' }
+  & node @verifyArgs
+  if ($LASTEXITCODE -ne 0) { throw 'Final artifact verification failed; installation test stopped' }
+}
 $baseline = Join-Path $projectRoot 'release/DesignExtractor-Personal-1.0.0-x64-Setup.exe'
 $stateFile = Join-Path $buildRoot "nsis-retention-$runId.json"
 $scope = '/currentuser'
@@ -54,7 +68,17 @@ try {
   & node desktop/tests/nsis-state.cjs seed $stateFile
   if ($LASTEXITCODE -ne 0) { throw 'Retention fixture failed' }
   Invoke-Setup $installer "/S $scope /D=$oldTarget"
+  # Explicit fixture migration validates the new storage layout. This does not
+  # claim acceptance of the first-run native migration confirmation dialog.
+  & node desktop/tests/nsis-state.cjs migrate $stateFile $oldTarget
+  if ($LASTEXITCODE -ne 0) { throw 'Disposable data migration failed' }
   Verify-State
+  $retainedDownloads = Join-Path $oldTarget 'Downloads'
+  New-Item -ItemType Directory -Path $retainedDownloads -Force | Out-Null
+  $downloadSentinel = Join-Path $retainedDownloads 'retained-download.txt'
+  [IO.File]::WriteAllText($downloadSentinel, $runId)
+  Invoke-Setup $installer "/S $scope /D=$oldTarget"
+  if ([IO.File]::ReadAllText($downloadSentinel) -ne $runId) { throw 'Same-directory upgrade removed Downloads' }
   $nonEmptyTarget = Join-Path $buildRoot "NSIS 非专用 Path $runId"
   New-Item -ItemType Directory -Path $nonEmptyTarget | Out-Null
   $unrelatedFile = Join-Path $nonEmptyTarget 'must-retain.txt'
@@ -69,6 +93,7 @@ try {
   if (-not (Test-Path -LiteralPath (Join-Path $oldTarget '去水印下载助手.exe'))) { throw 'Scope conflict removed original application' }
   Invoke-Setup $installer "/S $scope /D=$newTarget"
   Verify-State
+  if ([IO.File]::ReadAllText($downloadSentinel) -ne $runId) { throw 'Relocation removed old Downloads' }
   if (Test-Path -LiteralPath (Join-Path $oldTarget '去水印下载助手.exe')) { throw 'Old install remains after relocation' }
   $registeredPath = (Get-ItemProperty -LiteralPath $installRegistry).InstallLocation
   if ($registeredPath -ne $newTarget) { throw "Incorrect registered install directory: $registeredPath" }
@@ -84,10 +109,16 @@ try {
   Invoke-Setup $installer "/S $scope /D=$newTarget"
   Verify-State
   $installedExe = Join-Path $newTarget '去水印下载助手.exe'
+  $newDownloads = Join-Path $newTarget 'Downloads'
+  New-Item -ItemType Directory -Path $newDownloads -Force | Out-Null
+  $newDownloadSentinel = Join-Path $newDownloads 'retained-download.txt'
+  [IO.File]::WriteAllText($newDownloadSentinel, $runId)
   if (-not (Test-Path -LiteralPath $installedExe)) { throw 'Installed executable missing' }
   $versionInfo = (Get-Item -LiteralPath $installedExe).VersionInfo
   if ($versionInfo.FileVersion -ne $version -or $versionInfo.ProductName -ne '去水印下载助手') { throw 'Installed metadata mismatch' }
   $arguments = @('desktop/tests/packaged.cjs', "--installed=$newTarget", '--disposable-environment')
+  & node desktop/tests/nsis-state.cjs migrate $stateFile $newTarget
+  if ($LASTEXITCODE -ne 0) { throw 'Relocated disposable data migration failed' }
   if ($LiveGaoding) { $arguments += '--live-gaoding' }
   & node @arguments
   if ($LASTEXITCODE -ne 0) { throw 'Installed application smoke failed' }
@@ -103,6 +134,7 @@ try {
   $deadline = [DateTime]::UtcNow.AddSeconds(15)
   while ((Test-Path -LiteralPath $installedExe) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
   if (Test-Path -LiteralPath $installedExe) { throw 'Application files remain after uninstall' }
+  if ([IO.File]::ReadAllText($newDownloadSentinel) -ne $runId) { throw 'Uninstall removed Downloads' }
   if (Test-Path -LiteralPath $installRegistry) { throw 'Install registry remains after uninstall' }
   if (Test-Path -LiteralPath $menuShortcut) { throw 'Start Menu shortcut remains after uninstall' }
   if (Test-Path -LiteralPath $desktopShortcut) { throw 'Desktop shortcut remains after uninstall' }
@@ -113,6 +145,7 @@ try {
   $result.defaultShortcutPolicy = 'passed'
   $result.shortcutRelocationAndRemoval = 'passed'
   $result.invalidAndNonDedicatedPathsRejected = 'passed'
+  $result.downloadsRetainedOnUpgradeRelocationUninstall = 'passed'
   $result | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $projectRoot "server/test-artifacts/desktop-nsis-$($scope.TrimStart('/'))-results.json") -Encoding utf8
   $result | ConvertTo-Json
 } finally { Pop-Location }

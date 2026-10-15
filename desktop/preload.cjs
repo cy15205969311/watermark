@@ -13,5 +13,18 @@ contextBridge.exposeInMainWorld('desktop', Object.freeze({
     return () => ipcRenderer.removeListener('desktop:show-tutorial', listener);
   },
   openLogs: () => ipcRenderer.invoke('desktop:logs'),
+  onShowSettings: callback => {
+    if (typeof callback !== 'function') return () => {};
+    const listener = () => callback();
+    ipcRenderer.on('desktop:show-settings', listener);
+    return () => ipcRenderer.removeListener('desktop:show-settings', listener);
+  },
+  getSettings: () => ipcRenderer.invoke('desktop:status'),
+  chooseDownloadDirectory: () => ipcRenderer.invoke('desktop:choose-download'),
+  resetDownloadDirectory: () => ipcRenderer.invoke('desktop:reset-download'),
+  openDownloadDirectory: () => ipcRenderer.invoke('desktop:open-download'),
+  backup: () => ipcRenderer.invoke('desktop:backup'),
+  restore: () => ipcRenderer.invoke('desktop:restore'),
+  exportDiagnostics: () => ipcRenderer.invoke('desktop:diagnostics'),
   saveResource: (url, filename) => ipcRenderer.invoke('desktop:save-resource', { url, filename }),
 }));

@@ -50,7 +50,7 @@ async function prepare() {
   copyJavaScript(path.join(root, 'server'), path.join(application, 'server'));
   fs.cpSync(frontendOutput, path.join(application, 'client'), { recursive: true });
   fs.mkdirSync(path.join(application, 'desktop'), { recursive: true });
-  for (const name of ['main.cjs', 'preload.cjs', 'backend.cjs', 'security.cjs', 'config.cjs', 'logging.cjs', 'menus.cjs']) {
+  for (const name of ['main.cjs', 'preload.cjs', 'backend.cjs', 'security.cjs', 'config.cjs', 'logging.cjs', 'menus.cjs', 'settings.cjs', 'personal-data.cjs', 'diagnostics.cjs', 'download-directory.cjs', 'paths.cjs', 'storage-migration.cjs', 'feedback.cjs']) {
     fs.copyFileSync(path.join(root, 'desktop', name), path.join(application, 'desktop', name));
   }
   const serverPackage = JSON.parse(fs.readFileSync(path.join(root, 'server/package.json')));

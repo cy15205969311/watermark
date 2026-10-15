@@ -972,4 +972,5 @@ function startServer(port) {
 }
 
 if (require.main === module) startServer(PORT);
-module.exports = { app, ensureParseRecordColumns, ready, closeDatabase: () => pool.end() };
+module.exports = { app, ensureParseRecordColumns, ready, closeDatabase: () => pool.end(),
+  desktopDatabase: runtime.database === 'sqlite' ? pool : undefined };

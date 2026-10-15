@@ -8,6 +8,7 @@ const root = path.resolve(__dirname, '../..');
 const profile = path.resolve(process.argv.find(arg => arg.startsWith('--profile='))?.slice(10) || path.join(root, '.desktop-build/main-smoke 中文 空格'));
 if (!profile.startsWith(path.join(root, '.desktop-build') + path.sep)) throw new Error('Smoke profile must be inside build workspace');
 fs.mkdirSync(profile, { recursive: true });
+process.env.DESIGN_EXTRACTOR_DEV_DATA_DIR = profile;
 const getPath = app.getPath.bind(app);
 app.getPath = name => name === 'appData' ? profile : getPath(name);
 const verify = process.argv.includes('--verify-persistence');
@@ -19,7 +20,11 @@ dialog.showSaveDialog = async (_window, options) => {
   if (cancelNext) { cancelNext = false; return { canceled: true }; }
   return { canceled: false, filePath: path.join(profile, path.basename(options.defaultPath)) };
 };
-dialog.showMessageBox = async options => { failure = options.message; console.error('Unexpected startup dialog', options.message); return { response: 0 }; };
+dialog.showMessageBox = async (...args) => {
+  const options = args.at(-1);
+  if (options.title === '迁移旧版个人数据') { results.push('Actual main detects isolated legacy data and requests migration confirmation (dialog response injected)'); return { response: 1 }; }
+  failure = options.message; console.error('Unexpected startup dialog', options.message); return { response: 0 };
+};
 const timeout = setTimeout(() => { failure = 'Main smoke timeout'; app.quit(); }, 90000);
 app.on('will-quit', () => {
   clearTimeout(timeout); fixture?.close();

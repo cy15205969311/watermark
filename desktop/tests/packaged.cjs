@@ -8,10 +8,13 @@ const { spawnSync } = require('node:child_process');
 const asar = require('@electron/asar');
 const root = path.resolve(__dirname, '../..');
 const installed = process.argv.find(arg => arg.startsWith('--installed='))?.slice(12);
+const productionCopy = process.argv.includes('--production-copy');
 const destination = installed ? path.resolve(installed) : fs.mkdtempSync(path.join(root, '.desktop-build', '安装 中文 Path '));
 if (!destination.startsWith(path.join(root, '.desktop-build') + path.sep)) throw new Error('Test install must be inside build workspace');
-if (!installed) fs.cpSync(path.join(root, 'release/win-unpacked'), destination, { recursive: true });
+if (!installed) fs.cpSync(path.join(require('../scripts/artifact-paths.cjs').artifactDirectory(), 'win-unpacked'), destination, { recursive: true });
 const executable = path.join(destination, '去水印下载助手.exe');
+const digest = file => require('node:crypto').createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+const originalDigests = [executable, path.join(destination, 'resources/app.asar')].map(digest);
 // No daily-user history/config writes during package smoke. For a copied test
 // bundle only, install a bootstrap BEFORE the unchanged production entry.
 // Installed targets are permitted solely by the disposable NSIS test runner.
@@ -28,10 +31,17 @@ async function launch() {
   const info = await application.evaluate(({ app }) => {
     const load = process.getBuiltinModule('node:module').createRequire(app.getAppPath() + '/package.json');
     const runtime = load('./server/runtime.js').getRuntime();
-    return { isPackaged: app.isPackaged, userData: app.getPath('userData'), appPath: app.getAppPath(), database: runtime.database, databasePath: runtime.databasePath, chromiumPath: runtime.chromiumPath, mysqlLoaded: Object.keys(load.cache).some(name => /node_modules[\\/]mysql2[\\/]/.test(name)) };
+    return { isPackaged: app.isPackaged, userData: app.getPath('userData'), appPath: app.getAppPath(), database: runtime.database, databasePath: runtime.databasePath, chromiumPath: runtime.chromiumPath,
+      temp: app.getPath('temp'), sessionData: app.getPath('sessionData'), logs: app.getPath('logs'), browserProfileDirectory: runtime.browserProfileDirectory, browserDownloadDirectory: runtime.browserDownloadDirectory,
+      mysqlLoaded: Object.keys(load.cache).some(name => /node_modules[\\/]mysql2[\\/]/.test(name)) };
   });
   assert.equal(info.isPackaged, true); assert.equal(info.database, 'sqlite'); assert.equal(info.mysqlLoaded, false);
-  assert.ok(info.chromiumPath.startsWith(destination)); assert.ok(info.databasePath.startsWith(info.userData)); assert.ok(!info.databasePath.startsWith(destination));
+  assert.ok(info.chromiumPath.startsWith(destination)); assert.ok(info.databasePath.startsWith(info.userData)); assert.ok(info.databasePath.startsWith(path.join(destination, 'personal') + path.sep));
+  for (const value of [info.temp, info.sessionData, info.logs, info.browserProfileDirectory, info.browserDownloadDirectory]) assert.ok(value.startsWith(info.userData + path.sep));
+  if (!installed && !productionCopy) {
+    if (beforeIds === undefined) assert.deepEqual(fs.readdirSync(isolatedProfile), [], 'Initial startup must not write legacy AppData');
+    assert.equal(fs.existsSync(path.join(isolatedProfile, 'DesignExtractorPersonal')), false);
+  }
   origin = new URL(page.url()).origin;
   return { page, info };
 }
@@ -52,7 +62,13 @@ async function shutdown() {
   application = null;
 }
 async function run() {
-  if (!installed) {
+  if (!installed && productionCopy) {
+    // Data fixture only. Original EXE, ASAR and integrity fuses stay byte-for-byte
+    // unchanged. The initialization marker avoids prompting about daily data.
+    const data = path.join(destination, 'personal'); fs.mkdirSync(data);
+    fs.writeFileSync(path.join(data, '.storage-layout.json'), JSON.stringify({ version: 1, kind: 'new', at: new Date().toISOString() }));
+    results.push({ name: 'Unmodified production EXE/ASAR copy; isolated initialized personal data fixture, no bootstrap or fuse changes' });
+  } else if (!installed) {
     const archive = path.join(destination, 'resources/app.asar');
     const extracted = path.join(destination, 'test-bundle-source');
     asar.extractAll(archive, extracted);
@@ -73,8 +89,32 @@ async function run() {
     throw new Error('Installed-app smoke requires an explicitly disposable environment');
   }
   const first = await launch();
-  if (!installed) assert.ok(first.info.userData.startsWith(isolatedProfile + path.sep));
+  if (!installed) assert.equal(first.info.userData, path.join(destination, 'personal'));
   results.push({ name: 'Packaged app runs with Chinese/space installation path and no Node/Chrome on PATH', info: first.info });
+  const feedbackResult = await application.evaluate(async ({ Menu, dialog, shell, clipboard }) => {
+    const menu = Menu.getApplicationMenu().items.find(i => i.label === '帮助').submenu.items.find(i => i.label === '问题反馈 / 报告 Bug');
+    if (!menu) throw new Error('Feedback entry missing');
+    const show = dialog.showMessageBox, open = shell.openExternal, write = clipboard.writeText;
+    let copied, draft, preview;
+    try {
+      dialog.showMessageBox = async (_w, options) => { preview = options; return { response: 1 }; };
+      shell.openExternal = async url => { draft = url; throw new Error('isolated missing mail client fixture'); };
+      clipboard.writeText = value => { copied = value; }; // Do not alter user's clipboard.
+      menu.click();
+      const deadline = Date.now() + 5000;
+      while (!copied && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+      if (!copied) throw new Error('Feedback copy fallback did not complete');
+      return { draft, copied, fallbackTitle: preview.title };
+    } finally { dialog.showMessageBox = show; shell.openExternal = open; clipboard.writeText = write; }
+  });
+  assert.equal(new URL(feedbackResult.draft).pathname, 'ad4928115@gmail.com');
+  assert.equal(feedbackResult.fallbackTitle, '无法打开邮件客户端'); assert.match(feedbackResult.copied, /软件版本：1\.2\.0/);
+  results.push({ name: 'Actual packaged help callback composes mail draft and provides copy fallback; transport, native dialogs and clipboard injected, no mail sent' });
+  if (process.argv.includes('--download-ui')) {
+    if (installed) throw new Error('Native download acceptance uses only an isolated bundle copy');
+    console.log(await require('./download-native.cjs').verifyNativeDownloads(application, first.page, executable, isolatedProfile, path.join(root, 'server/test-artifacts')));
+    await shutdown(); return;
+  }
   if (process.argv.includes('--menu-ui')) {
     if (process.argv.includes('--menu-busy-fixture')) {
       // Hold an isolated local extraction fixture for native warning screenshots;
@@ -102,6 +142,7 @@ async function run() {
     return;
   }
   results.push(await require('./menu-runtime.cjs').verifyMenus(application, first.page));
+  if (!installed) results.push(...await require('./settings-runtime.cjs').verifySettings(application, first.page, isolatedProfile, path.join(root, 'server/test-artifacts')));
   const history = await request(first.page, '/history'); beforeIds = history.data.data.map(record => record.id);
   const p1 = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aOwAAAABJRU5ErkJggg==';
   const pages = Array.from({ length: 3 }, (_, i) => ({ page: i + 1, pageNumber: i + 1, pageId: `p${i + 1}`, designId: 'packaged-fixture', imageUrl: p1 }));
@@ -127,6 +168,7 @@ async function run() {
   await assert.rejects(fetch(`${oldOrigin}/api/health`));
   const restarted = await launch();
   assert.equal(await restarted.page.evaluate(() => window.desktop.clientId), client);
+  if (!installed) assert.equal((await restarted.page.evaluate(() => window.desktop.getSettings())).downloadDirectory, path.join(isolatedProfile, 'downloads'));
   const restored = await request(restarted.page, '/history');
   assert.equal(restored.data.data.find(record => record.id === createdIds[0]).pages.length, 3);
   assert.equal(restored.data.data.find(record => record.id === createdIds[1]).isAnimated, true);
@@ -134,6 +176,10 @@ async function run() {
   createdIds = [];
   results.push({ name: 'Packaged restart retains ordered multi-page/GIF metadata; test records removed', existingRecordIds: beforeIds });
   await shutdown();
+  if (productionCopy) {
+    assert.deepEqual([executable, path.join(destination, 'resources/app.asar')].map(digest), originalDigests);
+    results.push({ name: 'Original production EXE/ASAR hashes unchanged after startup, downloads, restore, feedback and restart' });
+  }
   fs.writeFileSync(path.join(root, 'server/test-artifacts/desktop-packaged-results.json'), JSON.stringify({ destination, results, cleanWindowsVM: 'not executed' }, null, 2));
   console.log(JSON.stringify({ passed: true, destination, results, cleanWindowsVM: 'not executed' }, null, 2));
 }

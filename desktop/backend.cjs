@@ -52,10 +52,14 @@ async function startBackend({ serverDirectory, frontendDirectory, chromiumPath, 
       });
       req.setTimeout(5000, () => req.destroy(new Error('本地服务健康检查超时'))); req.on('error', reject);
     });
-    const browser = await require(path.join(serverDirectory, 'services/browser-pool.js')).getDefaultPool().acquire();
+    const pool = require(path.join(serverDirectory, 'services/browser-pool.js')).getDefaultPool();
+    const browser = await pool.acquire();
+    const chromiumVersion = await browser.version();
     try { console.log('Desktop browser ready', { chromiumPath, chromiumVersion: await browser.version(), puppeteerVersion: require(require.resolve('puppeteer/package.json', { paths: [serverDirectory] })).version, pool: require(path.join(serverDirectory, 'services/browser-pool.js')).getDefaultPool().getStatus() }); }
     finally { require(path.join(serverDirectory, 'services/browser-pool.js')).getDefaultPool().release(browser); }
-    return { origin, token, stop };
+    return { origin, token, stop, database: api.desktopDatabase,
+      pause: () => guard.pause(), resume: () => guard.resume(),
+      status: () => ({ chromiumPath, chromiumVersion, browser: pool.getStatus(), database: api.desktopDatabase.status(), activeRequests: guard.active, telemetry: guard.telemetry }) };
   } catch (error) { await stop().catch(() => {}); throw error; }
 }
 module.exports = { startBackend };

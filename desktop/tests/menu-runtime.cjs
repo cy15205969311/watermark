@@ -89,7 +89,7 @@ async function verifyMenus(application, page) {
     await click('关于去水印下载助手');
     await click('打开日志文件夹'); await click('打开个人数据文件夹');
     const calls = await application.evaluate(() => ({ messages: menuTestCalls.messages, paths: menuTestCalls.paths }));
-    assert.match(calls.messages[0].detail, /1\.1\.1[\s\S]*SQLite/);
+    assert.match(calls.messages[0].detail, /1\.2\.0[\s\S]*SQLite/);
     assert.equal(calls.paths.length, 2);
     const reloaded = page.waitForEvent('load');
     await click('刷新界面'); await reloaded;

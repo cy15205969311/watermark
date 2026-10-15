@@ -42,7 +42,8 @@ function cleanProfile(profile) {
   if (!profile) return;
   const fs = require('node:fs');
   const path = require('node:path');
-  const directory = require('../runtime').getRuntime().temporaryDirectory;
+  const runtime = require('../runtime').getRuntime();
+  const directory = runtime.browserProfileDirectory || runtime.temporaryDirectory;
   if (!directory || !path.resolve(profile).startsWith(path.resolve(directory) + path.sep)) throw new Error('Invalid browser profile cleanup path');
   const cleanup = fs.promises.rm(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch(error => console.warn('Chromium 临时目录清理失败', error.code));
   cleanups.add(cleanup);
@@ -53,14 +54,28 @@ function launchTracked(puppeteer, options) {
   const runtime = require('../runtime').getRuntime();
   let profile;
   if (runtime.mode === 'desktop') {
-    profile = require('node:fs').mkdtempSync(require('node:path').join(runtime.temporaryDirectory, 'chromium-profile-'));
+    profile = require('node:fs').mkdtempSync(require('node:path').join(runtime.browserProfileDirectory || runtime.temporaryDirectory, 'chromium-profile-'));
     options = { ...options, userDataDir: profile };
     console.log('Chromium launch', { executablePath: options.executablePath, headless: options.headless, args: options.args, timeout: options.timeout });
   }
   const launch = (async () => {
     let browser;
-    try { browser = await puppeteer.launch(options); }
-    catch (error) { cleanProfile(profile); throw error; }
+    try {
+      browser = await puppeteer.launch(options);
+      if (runtime.mode === 'desktop') {
+        // A site-triggered attachment must not escape into Windows Downloads.
+        // User-facing saves still go through Electron's existing save dialog.
+        const directory = runtime.browserDownloadDirectory || require('node:path').join(runtime.temporaryDirectory, 'browser-downloads');
+        require('node:fs').mkdirSync(directory, { recursive: true });
+        const client = await browser.target().createCDPSession();
+        try { await client.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: directory }); }
+        catch (error) { await client.detach().catch(() => {}); throw error; }
+        // Chrome resets session-scoped download behavior on detach. Keep this
+        // control session for the browser lifetime, then release it on exit.
+        browser.once('disconnected', () => { client.detach().catch(() => {}); });
+      }
+    }
+    catch (error) { if (browser) await closeBrowser(browser).catch(() => {}); cleanProfile(profile); throw error; }
     browser.once('disconnected', () => { tracked.delete(browser); cleanProfile(profile); });
     if (closing) { await closeBrowser(browser); throw new Error('应用正在退出'); }
     tracked.add(browser);

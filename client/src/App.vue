@@ -9,6 +9,7 @@
           </el-icon>
           <h1>去水印<span>下载助手</span></h1>
         </div>
+        <DesktopSettings v-if="isDesktop" />
       </div>
 
       <!-- 全局下载对话框 -->
@@ -248,9 +249,11 @@ import { ElMessageBox, ElMessage } from 'element-plus'
 import HistoryItem from './components/HistoryItem.vue'
 import PlatformIcons from './components/PlatformIcons.vue'
 import DownloadDialog from './components/DownloadDialog.vue'
+import DesktopSettings from './components/DesktopSettings.vue'
 import { buildApiUrl } from './utils/api'
 
 const store = useStore()
+const isDesktop = Boolean(window.desktop)
 
 const inputUrl = ref('')
 const searchQuery = ref('')

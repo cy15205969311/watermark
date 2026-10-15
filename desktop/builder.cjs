@@ -13,11 +13,12 @@ module.exports = {
       catch (error) { if (!['EBUSY', 'EPERM'].includes(error.code) || attempt >= 12) throw error; await new Promise(resolve => setTimeout(resolve, 250)); }
     }
   },
-  directories: { app: '.desktop-build/app', output: 'release' },
+  directories: { app: '.desktop-build/app', output: process.env.DESKTOP_ARTIFACT_DIR || 'release' },
+  forceCodeSigning: false,
   artifactName: 'DesignExtractor-Personal-${version}-${arch}-Setup.${ext}',
   asar: true, asarUnpack: ['**/*.node', '**/node_modules/@img/**'],
   npmRebuild: false, // SQLite is built-in; Sharp uses its existing N-API win32 binary.
-  files: ['desktop/**/*', 'server/**/*.js', 'client/**/*', 'package.json', 'node_modules/**/*', '!**/.env*', '!**/test*', '!**/uploads/**', '!**/*.map'],
+  files: ['desktop/**/*', 'server/**/*.js', 'client/**/*', 'package.json', 'node_modules/**/*', '!**/.env*', '!**/test*', '!**/uploads/**', '!**/*.map', '!**/*.pfx', '!**/*.p12', '!**/*.pem', '!**/*.key', '!**/*.pvk', '!**/*.snk', '!**/*.jks'],
   extraResources: [{ from: '.desktop-build/chromium', to: 'chromium', filter: ['**/*'] },
     { from: '.desktop-build/notices', to: 'licenses', filter: ['**/*'] }],
   win: { target: [{ target: 'nsis', arch: ['x64'] }], icon: path.join(__dirname, 'assets/DesignExtractor-Personal-icon.ico'), signExecutable: false },

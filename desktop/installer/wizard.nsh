@@ -8,12 +8,12 @@
 
 !define MUI_ABORTWARNING
 !define MUI_WELCOMEPAGE_TITLE "欢迎安装去水印下载助手"
-!define MUI_WELCOMEPAGE_TEXT "版本 ${VERSION}$\r$\n$\r$\n解析设计稿链接，预览与下载图片、GIF 和多页设计稿。$\r$\n$\r$\n安装前请关闭正在运行的本应用。个人历史记录保存在各 Windows 账户自己的用户数据目录中，升级不会清空。$\r$\n$\r$\n建议仅为当前用户安装。"
+!define MUI_WELCOMEPAGE_TEXT "版本 ${VERSION}$\r$\n$\r$\n解析设计稿链接，预览与下载图片、GIF 和多页设计稿。$\r$\n$\r$\n安装前请关闭正在运行的本应用。个人历史保存在安装目录的 personal 内；所有用户安装时按 Windows SID 隔离。升级默认保留。$\r$\n$\r$\n建议仅为当前用户安装。"
 !define MUI_LICENSEPAGE_CHECKBOX
 !define MUI_LICENSEPAGE_CHECKBOX_TEXT "我已阅读并接受以上使用说明（不改变 MIT 及第三方开源许可）"
 !define MUI_LICENSEPAGE_BUTTON "下一步(&N) >"
 !define MUI_FINISHPAGE_TITLE "去水印下载助手安装完成"
-!define MUI_FINISHPAGE_TEXT "版本 ${VERSION} 已安装。$\r$\n$\r$\n个人数据与程序目录分开保存。卸载默认保留历史记录、上传文件及配置。"
+!define MUI_FINISHPAGE_TEXT "版本 ${VERSION} 已安装。$\r$\n$\r$\n个人数据集中保存在安装目录的 personal 内，与程序资源分开。卸载默认保留历史记录、上传文件及配置。"
 !define MUI_FINISHPAGE_RUN_TEXT "立即启动去水印下载助手"
 !define MUI_UNWELCOMEPAGE_TITLE "卸载去水印下载助手"
 !define MUI_UNWELCOMEPAGE_TEXT "本向导仅删除所选安装范围的程序文件和快捷方式。$\r$\n$\r$\n将保留个人历史记录、上传文件、日志和配置。不会访问其他 Windows 用户的个人目录。$\r$\n$\r$\n本版本不提供自动清空个人数据功能。"
@@ -352,10 +352,33 @@ Function ValidateDirectory
     StrCpy $2 $OriginalUserInstall
   ${EndIf}
   ${If} $INSTDIR != $2
+    ; An uninstalled application can leave only its own data and layout record.
+    ; Permit reinstall there without accepting arbitrary nonempty directories.
+    ReadINIStr $3 "$INSTDIR\storage-layout.ini" "storage" "appId"
+    ReadINIStr $4 "$INSTDIR\storage-layout.ini" "storage" "retention"
+    ReadINIStr $5 "$INSTDIR\storage-layout.ini" "storage" "scope"
+    ${If} $3 == "com.designextractor.personal"
+    ${AndIf} $4 == "personal-v1"
+    ${AndIf} $5 != $installScope
+      MessageBox MB_OK|MB_ICONEXCLAMATION "此目录保留了另一安装范围的 personal 数据。请选择相同安装范围，或先备份数据并选择新的空目录。不会转换或覆盖原数据。" /SD IDOK
+      StrCpy $InstallerStatus "scope_mismatch"
+      SetErrorLevel 1638
+      Abort
+    ${EndIf}
     FindFirst $0 $1 "$INSTDIR\*.*"
     ${DoWhile} $1 != ""
       ${If} $1 != "."
       ${AndIf} $1 != ".."
+        ${If} $3 == "com.designextractor.personal"
+        ${AndIf} $4 == "personal-v1"
+        ${AndIf} $5 == $installScope
+          ${If} $1 == "personal"
+          ${OrIf} $1 == "Downloads"
+          ${OrIf} $1 == "storage-layout.ini"
+            FindNext $0 $1
+            ${Continue}
+          ${EndIf}
+        ${EndIf}
         FindClose $0
         MessageBox MB_OK|MB_ICONEXCLAMATION "该目录已有文件。为避免影响其他文件，请选择新的空目录或本应用原安装目录。" /SD IDOK
         StrCpy $InstallerStatus "destination_not_empty"
@@ -431,6 +454,18 @@ Function StartApp
 FunctionEnd
 
 !macro customInstall
+  Call ProvisionPersonalStorage
+  FileOpen $0 "$INSTDIR\storage-layout.ini" w
+  FileWriteWord $0 0xFEFF
+  FileClose $0
+  WriteINIStr "$INSTDIR\storage-layout.ini" "storage" "appId" "com.designextractor.personal"
+  WriteINIStr "$INSTDIR\storage-layout.ini" "storage" "scope" "$installScope"
+  WriteINIStr "$INSTDIR\storage-layout.ini" "storage" "retention" "personal-v1"
+  ${If} $installScope == "machine"
+    WriteINIStr "$INSTDIR\storage-layout.ini" "storage" "previousInstall" "$OriginalMachineInstall"
+  ${Else}
+    WriteINIStr "$INSTDIR\storage-layout.ini" "storage" "previousInstall" "$OriginalUserInstall"
+  ${EndIf}
   ${If} $DesktopWanted != ${BST_CHECKED}
     Delete "$newDesktopLink"
   ${EndIf}
@@ -438,6 +473,62 @@ FunctionEnd
     Delete "$newStartMenuLink"
   ${EndIf}
 !macroend
+
+; Only the data container receives additional permissions. Program files and
+; resources retain their normal protected ACL. SID children are private at run.
+Function PreparePersonalStorage
+  ${If} $installScope == "machine"
+    StrCpy $0 $OriginalMachineInstall
+  ${Else}
+    StrCpy $0 $OriginalUserInstall
+  ${EndIf}
+  ${If} $0 != ""
+    IfFileExists "$0\personal\*.*" 0 storageLegacySafe
+    ReadINIStr $1 "$0\storage-layout.ini" "storage" "retention"
+    ${If} $1 != "personal-v1"
+      MessageBox MB_OK|MB_ICONSTOP "旧卸载程序尚未登记保留 personal 的能力。为避免升级误删，请先将旧安装目录中的 personal 完整备份到安装目录外，再卸载旧程序并安装此版本。不会自动清理个人数据。" /SD IDOK
+      SetErrorLevel 1638
+      Quit
+    ${EndIf}
+  ${EndIf}
+  storageLegacySafe:
+  Call ProvisionPersonalStorage
+FunctionEnd
+
+Function ProvisionPersonalStorage
+  ; Refuse junctions before granting permissions on either data container.
+  System::Call 'kernel32::GetFileAttributesW(w "$INSTDIR\personal") i .r0'
+  IntCmp $0 -1 storageRootMissing
+  IntOp $0 $0 & 0x400
+  IntCmp $0 0 storageRootMissing storagePermissionFailed storagePermissionFailed
+  storageRootMissing:
+  System::Call 'kernel32::GetFileAttributesW(w "$INSTDIR\personal\users") i .r0'
+  IntCmp $0 -1 storageUsersMissing
+  IntOp $0 $0 & 0x400
+  IntCmp $0 0 storageUsersMissing storagePermissionFailed storagePermissionFailed
+  storageUsersMissing:
+  CreateDirectory "$INSTDIR\personal"
+  ${If} $installScope == "machine"
+    ; Refuse a preexisting shared database rather than exposing it to accounts.
+    IfFileExists "$INSTDIR\personal\history.sqlite" storageSharedData 0
+    IfFileExists "$INSTDIR\personal\config.json" storageSharedData 0
+    InitPluginsDir
+    File /oname=$PLUGINSDIR\storage-permissions.ps1 "${PROJECT_DIR}\desktop\installer\storage-permissions.ps1"
+    nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\storage-permissions.ps1" -InstallDirectory "$INSTDIR"'
+    Pop $0
+    Pop $1
+    StrCmp $0 "0" 0 storagePermissionFailed
+  ${EndIf}
+  Return
+  storageSharedData:
+    MessageBox MB_OK|MB_ICONSTOP "检测到未隔离的 personal 数据库或配置。请先备份并由维护者分配到对应 Windows 用户；不会让不同账户共用历史记录。" /SD IDOK
+    SetErrorLevel 1638
+    Quit
+  storagePermissionFailed:
+    MessageBox MB_OK|MB_ICONSTOP "无法设置 personal 用户隔离目录权限。安装已停止，请检查磁盘是否支持 Windows 权限或选择其他安装位置。不会回退 AppData。" /SD IDOK
+    SetErrorLevel 5
+    Quit
+FunctionEnd
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro licensePage

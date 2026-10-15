@@ -75,6 +75,7 @@ pnpm-lock.yaml
 # 备份文件
 *.bak
 *.backup
+*.dexp-backup/
 
 # Generated extraction diagnostics and browser test output
 server/818ps-observed*
@@ -83,3 +84,17 @@ server/818ps-live-*.log
 server/test-artifacts/
 .desktop-build/
 release/
+
+# Signing credentials stay outside the repository and packaged staging.
+*.pfx
+*.p12
+*.pem
+*.key
+*.pvk
+*.snk
+*.jks
+*.keystore
+*credentials*.json
+.env.signing*
+signing.local.*
+signing-debug*

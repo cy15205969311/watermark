@@ -16,7 +16,7 @@ function contextTemplate(params) {
   ];
 }
 
-function installMenus({ app, Menu, dialog, shell, window, directory, isBusy, isQuitting = () => false }) {
+function installMenus({ app, version = app.getVersion(), Menu, dialog, shell, window, directory, isBusy, isQuitting = () => false, isMaintenance = () => false, exportDiagnostics, reportBug }) {
   let confirming = false;
   let allowUnload = false;
   const confirmRefresh = () => {
@@ -32,6 +32,7 @@ function installMenus({ app, Menu, dialog, shell, window, directory, isBusy, isQ
     } finally { confirming = false; }
   };
   const reload = () => {
+    if (isMaintenance()) return;
     if (isBusy() && !confirmRefresh()) return;
     // beforeunload also protects F5, Ctrl+Shift+R and reloads outside this menu.
     allowUnload = true;
@@ -39,6 +40,7 @@ function installMenus({ app, Menu, dialog, shell, window, directory, isBusy, isQ
   };
   window.webContents.on('did-finish-load', () => { allowUnload = false; });
   window.webContents.on('will-prevent-unload', event => {
+    if (isMaintenance()) return;
     if (isQuitting() || allowUnload || confirmRefresh()) event.preventDefault();
     allowUnload = false;
   });
@@ -59,6 +61,9 @@ function installMenus({ app, Menu, dialog, shell, window, directory, isBusy, isQ
       { label: '打开个人数据文件夹', click: () => openDirectory(directory) },
       { type: 'separator' },
       { label: '退出程序', accelerator: 'Alt+F4', click: () => app.quit() },
+      { type: 'separator' },
+      { label: '设置与数据管理', accelerator: 'Ctrl+,', click: () => window.webContents.send('desktop:show-settings') },
+      ...(exportDiagnostics ? [{ label: '导出诊断信息', click: exportDiagnostics }] : []),
     ] },
     { label: '编辑', submenu: [
       { label: '撤销', role: 'undo', accelerator: 'Ctrl+Z' },
@@ -77,11 +82,12 @@ function installMenus({ app, Menu, dialog, shell, window, directory, isBusy, isQ
     ] },
     { label: '帮助', submenu: [
       { label: '使用教程', click: () => window.webContents.send('desktop:show-tutorial') },
+      ...(reportBug ? [{ label: '问题反馈 / 报告 Bug', click: reportBug }] : []),
       { label: '打开日志文件夹', click: openLogs },
       { type: 'separator' },
       { label: '关于去水印下载助手', click: () => dialog.showMessageBox(window, {
         type: 'info', title: '关于去水印下载助手', message: '去水印下载助手',
-        detail: `个人版 ${app.getVersion()}\n桌面运行模式：Electron + SQLite\n项目按 MIT 许可证提供，第三方组件遵循各自开源许可。`,
+        detail: `个人版 ${version}\n桌面运行模式：Electron + SQLite\n项目按 MIT 许可证提供，第三方组件遵循各自开源许可。`,
         buttons: ['确定'],
       }) },
     ] },

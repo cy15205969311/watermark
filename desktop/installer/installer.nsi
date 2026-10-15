@@ -101,6 +101,7 @@ Section "install" INSTALL_SECTION_ID
       Quit
     ${EndIf}
     Call ValidateDirectory
+    Call PreparePersonalStorage
     !include "${PROJECT_DIR}\.desktop-build\nsis\installSection.nsh"
   !endif
 SectionEnd
@@ -115,4 +116,5 @@ FunctionEnd
 Function un._GetProcessInfo
   !insertmacro FUNC_GETPROCESSINFO
 FunctionEnd
-!include "uninstaller.nsh"
+!include "${PROJECT_DIR}\desktop\installer\keep-downloads.nsh"
+!include "${PROJECT_DIR}\.desktop-build\nsis\uninstaller.nsh"

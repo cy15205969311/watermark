@@ -1,0 +1,13 @@
+const { app } = require('electron');
+const path = require('node:path');
+const fs = require('node:fs');
+const root = path.resolve(__dirname, '../..');
+const profile = path.resolve(process.argv.find(a => a.startsWith('--profile='))?.slice(10) || '');
+if (!profile.startsWith(path.join(root, '.desktop-build', 'settings-profile-'))) throw new Error('Isolated settings profile required');
+fs.mkdirSync(profile, { recursive: true });
+app.setPath('appData', profile);
+process.env.DESIGN_EXTRACTOR_DEV_DATA_DIR = profile;
+const getPath = app.getPath.bind(app);
+const developmentDownloads = path.join(profile, 'Development Downloads'); fs.mkdirSync(developmentDownloads);
+app.getPath = name => name === 'downloads' ? developmentDownloads : getPath(name);
+require('../main.cjs');
