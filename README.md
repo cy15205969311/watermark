@@ -5,10 +5,13 @@
 新增 Windows 桌面个人版（Electron + SQLite），原服务器版仍默认 MySQL、保留 `cd server && npm start`。安装、开发、打包、数据备份见 [桌面版指南](DESKTOP_GUIDE.md)，实际测试与未完成验收见 [交付报告](DESKTOP_DELIVERY_REPORT.md)。
 
 项目当前分成两条主线能力：
-桌面版地址：https://github.com/cy15205969311/watermark/releases/tag/V1.2.0
 - 在线链接解析：从设计平台或内容平台链接中提取真实图片地址，支持单图和多页套图。
 - 本地图片去水印：上传本地图片后，按自动或指定算法进行处理，并保存处理记录。
-
++## 桌面版下载
++
++- **最新正式版（Windows x64）：** [下载最新发行版](https://github.com/cy15205969311/watermark/releases/latest)
++- **v1.2.0 指定版本：** [查看发行说明与安装包](https://github.com/cy15205969311/watermark/releases/tag/V1.2.0)
++- **全部发行版本：** [查看 GitHub Releases](https://github.com/cy15205969311/watermark/releases)
 ## 功能概览
 
 ### 1. 在线链接解析
